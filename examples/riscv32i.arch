@@ -1,0 +1,63 @@
+
+
+#architecture rv32i
+
+symbol reg[5] = r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7
+
+mnem add  $rd:reg, $rs1:reg, $rs2:reg             -> [32]     0000 000    $rs2 $rs1 000 $rd 01 100 11
+mnem addi $rd:reg, $rs1:reg, $imm:int(0<=FFFFh)   -> [32]     $imm[11:0]       $rs1 000 $rd 00 100 11
+
+#end rv32i
+
+
+
+
+#architecture select8b
+
+symbol reg[3] = r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7
+
+mnem    li $imm:int(-64:63)  -> 00 $imm[5:0]
+mnem    mov $rd:reg, $rs:reg -> 01 $rd $rs
+----------------------------------------
+-- READ-OPS
+mnem    and   $rs:reg  -> 10 000 $rs
+mnem    or    $rs:reg  -> 10 001 $rs
+mnem    nand  $rs:reg  -> 10 010 $rs
+mnem    nor   $rs:reg  -> 10 011 $rs
+
+mnem    add   $rs:reg  -> 10 100 $rs
+mnem    sub   $rs:reg  -> 10 101 $rs
+mnem    xor   $rs:reg  -> 10 110 $rs
+mnem    jmpin $rs:reg  -> 10 111 $rs
+----------------------------------------
+-- BRANCHES
+mnem    brz   $rs:reg  -> 11 000 $rs
+mnem    bnz   $rs:reg  -> 11 001 $rs
+mnem    blt   $rs:reg  -> 11 010 $rs
+mnem    bge   $rs:reg  -> 11 011 $rs
+-- WRITE-OPS
+mnem    inc            -> 11 100 $rd
+mnem    dec            -> 11 101 $rd
+mnem    write          -> 11 110 $rd
+
+mnem                   -> 11 111 000
+mnem                   -> 11 111 001
+mnem                   -> 11 111 010
+mnem                   -> 11 111 011
+mnem                   -> 11 111 100
+mnem                   -> 11 111 101
+mnem                   -> 11 111 110
+mnem  jmp $addr:label  -> 11 111 111
+
+
+#end select8b
+
+
+and r0
+
+fibo:
+    li 1
+    mov r1, r0
+    li 0
+    jmp fibo
+

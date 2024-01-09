@@ -1,0 +1,43 @@
+
+
+
+mnem    li $imm:int(-64:63)  -> 00 $imm[5:0]
+mnem    mov $rd:reg, $rs:reg -> 01 $rd $rs
+----------------------------------------
+-- READ-OPS
+mnem    and   $rs:reg  -> 10 000 $rs
+mnem    or    $rs:reg  -> 10 001 $rs
+mnem    load  $rd:reg  -> 10 010 $rd
+mnem    store $rs:reg  -> 10 011 $rs
+
+mnem    add   $rs:reg  -> 10 100 $rs
+mnem    sub   $rs:reg  -> 10 101 $rs
+mnem    xor   $rs:reg  -> 10 110 $rs
+mnem    radd  $rd:reg  -> 10 111 $rd
+----------------------------------------
+-- BRANCHES
+mnem    brz   $rs:reg  -> 11 000 $rs
+mnem    bnz   $rs:reg  -> 11 001 $rs
+mnem    blt   $rs:reg  -> 11 010 $rs
+mnem    bge   $rs:reg  -> 11 011 $rs
+mnem    ble            -> 11 100 $rd
+mnem    bgt   $rs:reg  -> 11 101 $rd
+mnem    inc   $r:reg   -> 11 110 $r
+
+mnem    mov acc, sp    -> 11 111 000
+mnem    mov sp, acc    -> 11 111 001
+mnem    mov sp, fp     -> 11 111 010
+mnem    mov fp, sp     -> 11 111 011
+mnem    not acc        -> 11 111 100
+mnem    dec acc        -> 11 111 101
+mnem    mov acc, ip    -> 11 111 110
+mnem    mov ip, acc    -> 11 111 111 (jmp)
+
+
+--- data select
+000 ALU
+001
+010 ip lo
+011 ip hi
+100 sp lo
+101 sp hi
