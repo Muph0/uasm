@@ -264,7 +264,10 @@ impl Parser {
                 }
                 Encode::Param { id, part } => {
                     if *id >= parsed_params.len() {
-                        return self.err(format!("A parameter {id} expected, but only parsed {parsed_params:?}"));
+                        return self.err(format!(
+                            "A parameter #{id} expected, but only parsed total of {}.",
+                            parsed_params.len()
+                        ));
                     }
                     let value = parsed_params[*id];
                     println!("Appending param {:03X}:{} to {}", value, part.len(), code);
@@ -276,7 +279,14 @@ impl Parser {
         }
 
         println!("Converted instruction: {}", code);
-        todo!("Convert parsed params to bitstring");
+        assert!(code.len() % 8 == 0);
+
+        let bytes = code.len() / 8;
+        for i in 0..bytes {
+            let byte: u8 = code[0 + i * 8..8 + i * 8].load();
+            self.program.push(byte);
+        }
+
         Ok(())
     }
 
@@ -364,6 +374,7 @@ impl Parser {
         let size = self.read_size_opt(line);
 
         let mut encoding = Vec::<Encode>::new();
+        let mut encode_params = 0;
         loop {
             let token = read_token(line);
             if token.is_empty() {
@@ -393,7 +404,9 @@ impl Parser {
                             ))
                         }
                     };
-                    Encode::Param { id: param_id, part }
+                    let id = encode_params;
+                    encode_params += 1;
+                    Encode::Param { id, part }
                 }
                 _ => {
                     let bits = usize::from_str_radix(token, 2)?;
@@ -935,7 +948,42 @@ mod tests {
     }
 
     #[test]
-    fn mnemonic_params_parsed() {
+    fn mnemonic_params_parsed_and_encoded() {
+        let mut p = Parser::new();
+        let mut asm = |line| p.accept_line(line).unwrap();
+        let mut s = |text| String::from(text);
+
+        asm("#architecture a1");
+        asm("symbol reg[2] = r0 | r1 | r2 | r3");
+        asm("mnem sum $r0:reg, $r1:reg, $r2:reg, $r3:reg, $r4:reg -> 100100 $r0 $r1 $r2 $r3 $r4");
+        asm("#end a1");
+
+        let ir = p.arch().get_ir_by_name("sum").unwrap().0;
+        let (_, reg2) = p.arch().get_symbol_by_name("reg").unwrap();
+
+        assert_eq!(ir.mnem, "sum");
+        assert_eq!(ir.params.len(), 9);
+        assert_eq!(ir.params[0], Param::Symbol { name: s("r0"), symbol: reg2, limit: None });
+        assert_eq!(ir.params[1], Param::Token { value: s(",")});
+        assert_eq!(ir.params[2], Param::Symbol { name: s("r1"), symbol: reg2, limit: None });
+        assert_eq!(ir.params[3], Param::Token { value: s(",")});
+        assert_eq!(ir.params[4], Param::Symbol { name: s("r2"), symbol: reg2, limit: None });
+        assert_eq!(ir.params[5], Param::Token { value: s(",")});
+        assert_eq!(ir.params[6], Param::Symbol { name: s("r3"), symbol: reg2, limit: None });
+        assert_eq!(ir.params[7], Param::Token { value: s(",")});
+        assert_eq!(ir.params[8], Param::Symbol { name: s("r4"), symbol: reg2, limit: None });
+
+        assert_eq!(ir.encoding.len(), 6);
+        assert_eq!(ir.encoding[0], Encode::Bits { value: 0b100100, size: 6 });
+        assert_eq!(ir.encoding[1], Encode::Param { id: 0, part: 0..2 });
+        assert_eq!(ir.encoding[2], Encode::Param { id: 1, part: 0..2 });
+        assert_eq!(ir.encoding[3], Encode::Param { id: 2, part: 0..2 });
+        assert_eq!(ir.encoding[4], Encode::Param { id: 3, part: 0..2 });
+        assert_eq!(ir.encoding[5], Encode::Param { id: 4, part: 0..2 });
+    }
+
+    #[test]
+    fn mnemonic_params_encoded() {
         let p = parser_setup_mov();
 
         let ir = p.arch().get_ir_by_name("mov").unwrap().0;
@@ -947,7 +995,7 @@ mod tests {
         assert_eq!(ir.encoding[0], Encode::Bits { value: 2, size: 3 });
         assert_eq!(ir.encoding[1], Encode::Param { id: 0, part: 0..2 });
         assert_eq!(ir.encoding[2], Encode::Bits { value: 1, size: 1 });
-        assert_eq!(ir.encoding[3], Encode::Param { id: 2, part: 0..2 });
+        assert_eq!(ir.encoding[3], Encode::Param { id: 1, part: 0..2 });
     }
 
     #[test]
