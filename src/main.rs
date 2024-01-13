@@ -222,11 +222,20 @@ impl Parser {
 
         match token {
             "architecture" => self.start_architecture_block(line),
-            "use" => todo!(),
+            "use" => self.accept_directive_use(line),
             _ => self.err(format!(
                 "Unknown directive '#{token}'. Expected '#architecture' or '#use'."
             )),
         }
+    }
+    fn accept_directive_use(&mut self, mut line: &str) -> ParserResult<()> {
+        let token = self.read_indentifier(&mut line)?;
+        if let Some(arch) = self.arch_names.get(token) {
+            self.current_arch = arch.0;
+        } else {
+            return self.err(format!("Unknown architecture \"{token}\"."));
+        }
+        self.read_eol(&mut line)
     }
     fn accept_program_label(&mut self, label: &str) -> ParserResult<()> {
         println!("Label: {}", label);
@@ -963,18 +972,59 @@ mod tests {
 
         assert_eq!(ir.mnem, "sum");
         assert_eq!(ir.params.len(), 9);
-        assert_eq!(ir.params[0], Param::Symbol { name: s("r0"), symbol: reg2, limit: None });
-        assert_eq!(ir.params[1], Param::Token { value: s(",")});
-        assert_eq!(ir.params[2], Param::Symbol { name: s("r1"), symbol: reg2, limit: None });
-        assert_eq!(ir.params[3], Param::Token { value: s(",")});
-        assert_eq!(ir.params[4], Param::Symbol { name: s("r2"), symbol: reg2, limit: None });
-        assert_eq!(ir.params[5], Param::Token { value: s(",")});
-        assert_eq!(ir.params[6], Param::Symbol { name: s("r3"), symbol: reg2, limit: None });
-        assert_eq!(ir.params[7], Param::Token { value: s(",")});
-        assert_eq!(ir.params[8], Param::Symbol { name: s("r4"), symbol: reg2, limit: None });
+        assert_eq!(
+            ir.params[0],
+            Param::Symbol {
+                name: s("r0"),
+                symbol: reg2,
+                limit: None
+            }
+        );
+        assert_eq!(ir.params[1], Param::Token { value: s(",") });
+        assert_eq!(
+            ir.params[2],
+            Param::Symbol {
+                name: s("r1"),
+                symbol: reg2,
+                limit: None
+            }
+        );
+        assert_eq!(ir.params[3], Param::Token { value: s(",") });
+        assert_eq!(
+            ir.params[4],
+            Param::Symbol {
+                name: s("r2"),
+                symbol: reg2,
+                limit: None
+            }
+        );
+        assert_eq!(ir.params[5], Param::Token { value: s(",") });
+        assert_eq!(
+            ir.params[6],
+            Param::Symbol {
+                name: s("r3"),
+                symbol: reg2,
+                limit: None
+            }
+        );
+        assert_eq!(ir.params[7], Param::Token { value: s(",") });
+        assert_eq!(
+            ir.params[8],
+            Param::Symbol {
+                name: s("r4"),
+                symbol: reg2,
+                limit: None
+            }
+        );
 
         assert_eq!(ir.encoding.len(), 6);
-        assert_eq!(ir.encoding[0], Encode::Bits { value: 0b100100, size: 6 });
+        assert_eq!(
+            ir.encoding[0],
+            Encode::Bits {
+                value: 0b100100,
+                size: 6
+            }
+        );
         assert_eq!(ir.encoding[1], Encode::Param { id: 0, part: 0..2 });
         assert_eq!(ir.encoding[2], Encode::Param { id: 1, part: 0..2 });
         assert_eq!(ir.encoding[3], Encode::Param { id: 2, part: 0..2 });
