@@ -30,28 +30,42 @@ fn main() -> Result<(), Error> {
 
 type ParserResult<T> = Result<T, ParserError>;
 
+const SYMBOL_INT: SymbolTypeRef = SymbolTypeRef(0);
+const SYMBOL_LABEL: SymbolTypeRef = SymbolTypeRef(1);
+
 struct Arch {
     name: String,
-    symbol_table: Vec<TypedSymbol>,
+    symbol_table: Vec<SymbolType>,
     instructions: Vec<Instr>,
 }
 impl Arch {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            symbol_table: Vec::new(),
+            symbol_table: vec![
+                SymbolType {
+                    name: "int".to_string(),
+                    size: None,
+                    symbols: Default::default(),
+                },
+                SymbolType {
+                    name: "label".to_string(),
+                    size: None,
+                    symbols: Default::default(),
+                },
+            ],
             instructions: Vec::new(),
         }
     }
-    fn add_symbol(&mut self, symbol: TypedSymbol) {
+    fn add_symbol(&mut self, symbol: SymbolType) {
         self.symbol_table.push(symbol)
     }
-    fn get_symbol(&self, id: TypedSymbolRef) -> &TypedSymbol {
+    fn get_symbol(&self, id: SymbolTypeRef) -> &SymbolType {
         &self.symbol_table[id.0]
     }
-    fn get_symbol_by_name(&self, name: &str) -> Option<(&TypedSymbol, TypedSymbolRef)> {
+    fn get_symbol_by_name(&self, name: &str) -> Option<(&SymbolType, SymbolTypeRef)> {
         let id = self.symbol_table.iter().position(|s| s.name == name);
-        id.map(|id| (&self.symbol_table[id], TypedSymbolRef(id)))
+        id.map(|id| (&self.symbol_table[id], SymbolTypeRef(id)))
     }
     fn get_ir(&self, id: InstrRef) -> &Instr {
         &self.instructions[id.0]
@@ -66,9 +80,9 @@ impl Arch {
 struct ArchRef(usize);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-struct TypedSymbolRef(usize);
-impl TypedSymbolRef {
-    pub fn deref(self, arch: &Arch) -> &TypedSymbol {
+struct SymbolTypeRef(usize);
+impl SymbolTypeRef {
+    pub fn deref(self, arch: &Arch) -> &SymbolType {
         arch.get_symbol(self)
     }
 }
@@ -77,10 +91,10 @@ impl TypedSymbolRef {
 struct InstrRef(usize);
 
 #[derive(Debug)]
-struct TypedSymbol {
+struct SymbolType {
     name: String,
     size: Option<usize>,
-    variants: HashMap<String, usize>,
+    symbols: HashMap<String, usize>,
 }
 struct Instr {
     mnem: String,
@@ -101,7 +115,7 @@ impl<T> SizedInt<T> {
 enum Param {
     Symbol {
         name: String,
-        symbol: TypedSymbolRef,
+        symbol: SymbolTypeRef,
         limit: Option<Range<isize>>,
     },
     Token {
@@ -115,7 +129,7 @@ impl Param {
             Param::Token { value, .. } => value,
         }
     }
-    pub fn size(&self, symbol_table: &Vec<TypedSymbol>) -> Option<usize> {
+    pub fn size(&self, symbol_table: &Vec<SymbolType>) -> Option<usize> {
         match self {
             Param::Symbol { symbol, .. } => symbol_table[symbol.0].size,
             Param::Token { value, .. } => None,
@@ -252,11 +266,15 @@ impl Parser {
                     name,
                     symbol,
                     limit,
-                } => {
-                    let symbol = self.arch().get_symbol(*symbol);
-                    let value = self.read_symbol_value(symbol, limit.clone(), &mut line)?;
-                    parsed_params.push(value);
-                }
+                } => match *symbol {
+                    SYMBOL_INT => todo!(),
+                    SYMBOL_LABEL => todo!(),
+                    _ => {
+                        let symbol = self.arch().get_symbol(*symbol);
+                        let value = self.read_symbol_value(symbol, limit.clone(), &mut line)?;
+                        parsed_params.push(value);
+                    }
+                },
             }
         }
 
@@ -347,10 +365,10 @@ impl Parser {
         }
 
         {
-            let symbol = TypedSymbol {
+            let symbol = SymbolType {
                 name: name.to_string(),
                 size,
-                variants,
+                symbols: variants,
             };
             println!("{:?}", symbol);
             self.arch_mut().add_symbol(symbol);
@@ -520,7 +538,13 @@ impl Parser {
     }
     fn read_number_literal<'a>(&self, parent_line: &mut &'a str) -> ParserResult<isize> {
         let mut line = *parent_line;
-        let token = read_token(&mut line);
+        let mut token = read_token(&mut line);
+
+        let mut neg = false;
+        if token == "-" {
+            neg = true;
+            token = read_token(&mut line);
+        }
 
         let result = match token.chars().last() {
             Some('h') => isize::from_str_radix(&token[0..token.len() - 1], 16),
@@ -534,10 +558,12 @@ impl Parser {
             *parent_line = line;
         }
 
-        result.map_err(|e| ParserError {
-            message: format!("Invalid number literal '{token}'."),
-            cause: Some(Box::new(e.into())),
-        })
+        result
+            .map(|val| if !neg { val } else { -val })
+            .map_err(|e| ParserError {
+                message: format!("Invalid number literal '{token}'."),
+                cause: Some(Box::new(e.into())),
+            })
     }
     fn read_sized_number_literal<'a>(
         &self,
@@ -644,7 +670,7 @@ impl Parser {
     }
     fn read_symbol_value(
         &self,
-        symbol: &TypedSymbol,
+        symbol: &SymbolType,
         limit: Option<Range<isize>>,
         parent_line: &mut &str,
     ) -> ParserResult<isize> {
@@ -654,7 +680,7 @@ impl Parser {
         let num = if symbol.name == "int" {
             self.read_number_literal(&mut line)?
         } else {
-            let found = symbol.variants.get(token);
+            let found = symbol.symbols.get(token);
 
             if found.is_none() {
                 return self.err(format!(
@@ -662,7 +688,7 @@ impl Parser {
                     token,
                     symbol.name,
                     symbol
-                        .variants
+                        .symbols
                         .keys()
                         .map(|s| s.as_str())
                         .collect::<Vec<_>>()
@@ -814,16 +840,16 @@ fn is_ident(token: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{read_token, Arch, Encode, Param, Parser, TypedSymbol, TypedSymbolRef};
+    use crate::{read_token, Arch, Encode, Param, Parser, SymbolType, SymbolTypeRef};
 
-    fn setup_parser() -> Parser {
+    fn setup_parser_empty() -> Parser {
         let mut parser = Parser::new();
 
         parser.add_arch(Arch::new("test"));
-        parser.arch_mut().add_symbol(TypedSymbol {
+        parser.arch_mut().add_symbol(SymbolType {
             name: "reg".to_string(),
             size: Some(5),
-            variants: {
+            symbols: {
                 let mut variants = HashMap::new();
                 variants.insert("r0".to_string(), 0);
                 variants.insert("r1".to_string(), 1);
@@ -832,6 +858,32 @@ mod tests {
                 variants
             },
         });
+        parser
+    }
+    fn setup_parser_mov() -> Parser {
+        let mut parser = Parser::new();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm("#architecture a1");
+        asm("symbol reg[2] = r0 | r1 | r2 | r3");
+        asm("mnem mov $rd:reg, $rs:reg -> 010 $rd 1 $rs");
+        asm("#end a1");
+
+        parser
+    }
+    fn setup_parser_simple() -> Parser {
+        let mut parser = Parser::new();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm("#architecture simple1");
+        asm("symbol reg[2] = r0 | r1 | r2 | r3");
+        asm("mnem mov $src:reg, $dst:reg ->   0000 $src $dst");
+        asm("mnem add $src:reg, $dst:reg ->   0010 $src $dst");
+        asm("mnem sub $src:reg, $dst:reg ->   0011 $src $dst");
+        asm("mnem li  $imm:int(-64:63) ->   01 $imm[5:0]");
+        asm("mnem jmp $imm:int(0:4000h) -> 10 $imm[13:0]");
+        asm("#end simple1");
+
         parser
     }
 
@@ -868,8 +920,8 @@ mod tests {
 
     #[test]
     fn number_radix_is_correctly_parsed() {
-        let mut input = "numbers 1 FFh 10FFh 1010b 10o 100o 10 101 1111111111111111b";
-        let parser = setup_parser();
+        let mut input = "numbers 1 FFh 10FFh 1010b 10o 100o 10 101 1111111111111111b -5 -FFh";
+        let parser = setup_parser_empty();
 
         assert_eq!(read_token(&mut input), "numbers");
         assert_eq!(parser.read_number_literal(&mut input), Ok(1));
@@ -881,13 +933,15 @@ mod tests {
         assert_eq!(parser.read_number_literal(&mut input), Ok(10));
         assert_eq!(parser.read_number_literal(&mut input), Ok(101));
         assert_eq!(parser.read_number_literal(&mut input), Ok(0xffff));
+        assert_eq!(parser.read_number_literal(&mut input), Ok(-5));
+        assert_eq!(parser.read_number_literal(&mut input), Ok(-255));
         assert_eq!(read_token(&mut input).is_empty(), true);
     }
 
     #[test]
     fn range_is_correctly_parsed() {
         let mut input = "ranges 1:0 0:1";
-        let parser = setup_parser();
+        let parser = setup_parser_empty();
 
         assert_eq!(read_token(&mut input), "ranges");
         assert_eq!(parser.read_irange(&mut input).unwrap(), 0..1);
@@ -898,13 +952,13 @@ mod tests {
     #[test]
     fn param_is_correctly_parsed() {
         let mut input = "$test:reg $arg:reg(0:1)";
-        let parser = setup_parser();
+        let parser = setup_parser_empty();
 
         assert_eq!(
             parser.read_param(&mut input).unwrap(),
             Param::Symbol {
                 name: "test".to_string(),
-                symbol: TypedSymbolRef(0),
+                symbol: SymbolTypeRef(2),
                 limit: None
             }
         );
@@ -912,7 +966,7 @@ mod tests {
             parser.read_param(&mut input).unwrap(),
             Param::Symbol {
                 name: "arg".to_string(),
-                symbol: TypedSymbolRef(0),
+                symbol: SymbolTypeRef(2),
                 limit: Some(0..1)
             }
         );
@@ -924,7 +978,7 @@ mod tests {
 
         let lines = vec![
             "#architecture a1",
-            "symbol reg[2] = r0 | r1 | r2 | r3",
+            "symbol reg[2] = r0:0 | r1 | r2 | r3",
             "symbol test = r0 | r1 | hello:10 | world",
             "#end a1",
         ];
@@ -938,22 +992,11 @@ mod tests {
         assert_eq!(reg.size, Some(2));
 
         let test = parser.arch().get_symbol_by_name("test").unwrap().0;
-        assert_eq!(test.variants.get("r0"), Some(&0));
-        assert_eq!(test.variants.get("r1"), Some(&1));
-        assert_eq!(test.variants.get("hello"), Some(&10));
-        assert_eq!(test.variants.get("world"), Some(&11));
-    }
-
-    fn parser_setup_mov() -> Parser {
-        let mut parser = Parser::new();
-        let mut asm = |line| parser.accept_line(line).unwrap();
-
-        asm("#architecture a1");
-        asm("symbol reg[2] = r0 | r1 | r2 | r3");
-        asm("mnem mov $rd:reg, $rs:reg -> 010 $rd 1 $rs");
-        asm("#end a1");
-
-        parser
+        assert_eq!(test.symbols.get("r0"), Some(&0));
+        assert_eq!(test.symbols.get("r1"), Some(&1));
+        assert_eq!(test.symbols.get("hello"), Some(&10));
+        assert_eq!(test.symbols.get("world"), Some(&11));
+        assert_eq!(test.size, None);
     }
 
     #[test]
@@ -1034,7 +1077,7 @@ mod tests {
 
     #[test]
     fn mnemonic_params_encoded() {
-        let p = parser_setup_mov();
+        let p = setup_parser_mov();
 
         let ir = p.arch().get_ir_by_name("mov").unwrap().0;
 
@@ -1050,17 +1093,49 @@ mod tests {
 
     #[test]
     fn mnemonic_translated() {
-        let mut p = parser_setup_mov();
+        let mut p = setup_parser_mov();
+        let mut asm = |line| p.accept_line(line).unwrap();
 
-        p.accept_line("mov r0 r1").unwrap();
-        p.accept_line("mov r1 r2").unwrap();
-        p.accept_line("mov r2 r3").unwrap();
-        p.accept_line("mov r3 r0").unwrap();
+        asm("mov r0 r1");
+        asm("mov r1 r2");
+        asm("mov r2 r3");
+        asm("mov r3 r0");
 
         assert_eq!(p.program.len(), 4);
         assert_eq!(p.program[0], 0b01000101);
         assert_eq!(p.program[1], 0b01001110);
         assert_eq!(p.program[2], 0b01010111);
         assert_eq!(p.program[3], 0b01011100);
+    }
+
+    #[test]
+    fn label_backwards_translated() {
+        let mut parser = setup_parser_simple();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm("li 1");
+        asm("top:");
+        asm("mov r1, r2");
+        asm("mov r0, r1");
+        asm("add r2, r0");
+        asm("jmp top");
+
+        assert_eq!(parser.program[0], 0b01_000001);
+        assert_eq!(parser.program[1], 0b0000_01_10);
+        assert_eq!(parser.program[2], 0b0000_00_01);
+        assert_eq!(parser.program[3], 0b0010_10_00);
+        assert_eq!(parser.program[4], 0b10_000000);
+        assert_eq!(parser.program[5], 0b00000001);
+    }
+
+    #[test]
+    fn label_forwards_translated() {
+        let mut parser = setup_parser_simple();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm("jmp skip");
+        asm("li 1");
+        asm("skip:");
+        asm("li 2");
     }
 }
