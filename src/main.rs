@@ -30,8 +30,8 @@ fn main() -> Result<(), Error> {
 
 type ParserResult<T> = Result<T, ParserError>;
 
-const SYMBOL_INT: SymbolTypeRef = SymbolTypeRef(0);
-const SYMBOL_LABEL: SymbolTypeRef = SymbolTypeRef(1);
+const SYMBOL_INT: SymbolTypeId = SymbolTypeId(0);
+const SYMBOL_LABEL: SymbolTypeId = SymbolTypeId(1);
 
 struct Arch {
     name: String,
@@ -46,12 +46,12 @@ impl Arch {
                 SymbolType {
                     name: "int".to_string(),
                     size: None,
-                    symbols: Default::default(),
+                    variants: Default::default(),
                 },
                 SymbolType {
                     name: "label".to_string(),
                     size: None,
-                    symbols: Default::default(),
+                    variants: Default::default(),
                 },
             ],
             instructions: Vec::new(),
@@ -60,18 +60,21 @@ impl Arch {
     fn add_symbol(&mut self, symbol: SymbolType) {
         self.symbol_table.push(symbol)
     }
-    fn get_symbol(&self, id: SymbolTypeRef) -> &SymbolType {
+    fn get_symbol(&self, id: SymbolTypeId) -> &SymbolType {
         &self.symbol_table[id.0]
     }
-    fn get_symbol_by_name(&self, name: &str) -> Option<(&SymbolType, SymbolTypeRef)> {
+    fn get_symbol_mut(&mut self, id: SymbolTypeId) -> &mut SymbolType {
+        &mut self.symbol_table[id.0]
+    }
+    fn get_symbol_by_name(&self, name: &str) -> Option<(&SymbolType, SymbolTypeId)> {
         let id = self.symbol_table.iter().position(|s| s.name == name);
-        id.map(|id| (&self.symbol_table[id], SymbolTypeRef(id)))
+        id.map(|id| (&self.symbol_table[id], SymbolTypeId(id)))
     }
     fn get_ir(&self, id: InstrRef) -> &Instr {
         &self.instructions[id.0]
     }
-    fn get_ir_by_name(&self, name: &str) -> Option<(&Instr, InstrRef)> {
-        let id = self.instructions.iter().position(|s| s.mnem == name);
+    fn get_instr_by_name(&self, name: &str) -> Option<(&Instr, InstrRef)> {
+        let id = self.instructions.iter().position(|s| s.mnemonic == name);
         id.map(|id| (&self.instructions[id], InstrRef(id)))
     }
 }
@@ -80,8 +83,8 @@ impl Arch {
 struct ArchRef(usize);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-struct SymbolTypeRef(usize);
-impl SymbolTypeRef {
+struct SymbolTypeId(usize);
+impl SymbolTypeId {
     pub fn deref(self, arch: &Arch) -> &SymbolType {
         arch.get_symbol(self)
     }
@@ -94,10 +97,15 @@ struct InstrRef(usize);
 struct SymbolType {
     name: String,
     size: Option<usize>,
-    symbols: HashMap<String, usize>,
+    variants: HashMap<String, usize>,
+}
+impl SymbolType {
+    fn get_variant(&self, token: &str) -> Option<&usize> {
+        self.variants.get(token)
+    }
 }
 struct Instr {
-    mnem: String,
+    mnemonic: String,
     params: Vec<Param>,
     encoding: Vec<Encode>,
 }
@@ -115,7 +123,7 @@ impl<T> SizedInt<T> {
 enum Param {
     Symbol {
         name: String,
-        symbol: SymbolTypeRef,
+        symbol_id: SymbolTypeId,
         limit: Option<Range<isize>>,
     },
     Token {
@@ -131,7 +139,9 @@ impl Param {
     }
     pub fn size(&self, symbol_table: &Vec<SymbolType>) -> Option<usize> {
         match self {
-            Param::Symbol { symbol, .. } => symbol_table[symbol.0].size,
+            Param::Symbol {
+                symbol_id: symbol, ..
+            } => symbol_table[symbol.0].size,
             Param::Token { value, .. } => None,
         }
     }
@@ -144,8 +154,17 @@ enum Encode {
 }
 
 struct LabelRequest {
-    address: usize,
-    ir: Instr,
+    offset_bits: usize,
+    size_bits: usize,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedSymbol {
+    Value(isize),
+    UnresolvedLabel {
+        label: String,
+    },
 }
 
 struct Parser {
@@ -196,37 +215,54 @@ impl Parser {
 
     fn accept_program_line(&mut self, mut line: &str) -> ParserResult<()> {
         println!("Program line: {}", line);
-        let mut tok = read_token(&mut line);
-        if tok == "#" {
+        let mut token = read_token(&mut line);
+        if token == "#" {
             return self.accept_program_directive(line);
-        } else if tok == "--" {
+        } else if token == "--" {
             // comment
             println!("Comment: {}", line);
             return Ok(());
         }
 
-        if is_ident(tok) {
+        if is_identifier(token) {
             let next = read_token_peek(&line);
             if next == ":" {
                 self.read_exact(":", &mut line);
-                self.accept_program_label(tok)?;
-                tok = read_token(&mut line);
+                self.accept_program_label(token)?;
+                token = read_token(&mut line);
             }
         }
 
-        if is_ident(tok) {
-            let ir = self.arch().get_ir_by_name(tok);
+        if line.is_empty() {
+            return Ok(());
+        }
+
+        if is_identifier(token) {
+            let ir = self.arch().get_instr_by_name(token);
+            // TODO: repeat until match
             if let Some((_, ir)) = ir {
-                return self.accept_program_instr(ir, line);
+                let code = self.accept_program_instr(ir, line)?;
+
+                // convert to bytes
+                let bytes = code.len() / 8;
+                for i in 0..bytes {
+                    let byte: u8 = code[0 + i * 8..8 + i * 8].load();
+                    self.program.push(byte);
+                }
+                return Ok(());
             } else {
-                return self.err(format!("Unknown mnemonic '{tok}'."));
+                return self.err(format!("Unknown mnemonic '{token}'."));
             }
         }
 
-        let irs = self.arch().instructions.iter().map(|ir| ir.mnem.as_str());
+        let irs = self
+            .arch()
+            .instructions
+            .iter()
+            .map(|ir| ir.mnemonic.as_str());
         self.err(format!(
             "Unknown token '{}', expected one of '#', {}",
-            tok,
+            token,
             irs.collect::<Vec<_>>().join(", ")
         ))
     }
@@ -253,10 +289,31 @@ impl Parser {
     }
     fn accept_program_label(&mut self, label: &str) -> ParserResult<()> {
         println!("Label: {}", label);
-        todo!()
+
+        let value = self.program.len();
+
+        let symbol = self.arch_mut().get_symbol_mut(SYMBOL_LABEL);
+        symbol.variants.insert(label.to_string(), value);
+
+        // resolve requests under this label
+        let requests = self.label_requests.remove(label);
+        if let Some(requests) = requests {
+            for req in requests {
+                // rewrite
+                let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
+                let offset = req.offset_bits;
+                let size = req.size_bits;
+                println!("{:?}", program_bits);
+                program_bits[offset..offset + size].store_be(value);
+                println!("{:?}", program_bits);
+            }
+        }
+
+        Ok(())
     }
-    fn accept_program_instr(&mut self, ir: InstrRef, mut line: &str) -> ParserResult<()> {
-        let mut parsed_params = Vec::<isize>::new();
+    fn accept_program_instr(&mut self, ir: InstrRef, mut line: &str) -> ParserResult<BitVec<usize, Msb0>> {
+        let mut parsed_params = Vec::<ParsedSymbol>::new();
+
         for expect_param in &self.arch().get_ir(ir).params {
             match expect_param {
                 Param::Token { value } => {
@@ -264,30 +321,26 @@ impl Parser {
                 }
                 Param::Symbol {
                     name,
-                    symbol,
+                    symbol_id,
                     limit,
-                } => match *symbol {
-                    SYMBOL_INT => todo!(),
-                    SYMBOL_LABEL => todo!(),
-                    _ => {
-                        let symbol = self.arch().get_symbol(*symbol);
-                        let value = self.read_symbol_value(symbol, limit.clone(), &mut line)?;
-                        parsed_params.push(value);
-                    }
-                },
+                } => {
+                    let parsed = self.read_symbol_value(*symbol_id, limit.clone(), &mut line)?;
+                    parsed_params.push(parsed);
+                }
             }
         }
 
-        let mut code = BitVec::<usize, Msb0>::with_capacity(1);
-        let mut end = 0;
+        // generate binary code
+        let mut code: BitVec<usize, Msb0> = BitVec::with_capacity(1);
+        let mut label_requests = Vec::new();
         let ir = self.arch().get_ir(ir);
         for frag in &ir.encoding {
             match frag {
                 Encode::Bits { value, size } => {
                     println!("Appending const {:03X}:{} to {}", value, size, code);
-                    code.resize(code.len() + size, false);
+                    let end = code.len();
+                    code.resize(end + size, false);
                     code[end..end + size].store(*value);
-                    end += size;
                 }
                 Encode::Param { id, part } => {
                     if *id >= parsed_params.len() {
@@ -296,25 +349,37 @@ impl Parser {
                             parsed_params.len()
                         ));
                     }
-                    let value = parsed_params[*id];
+
+                    let parsed = parsed_params[*id].clone();
+                    let end = code.len();
+
+                    let value = match parsed {
+                        ParsedSymbol::Value(value) => value,
+                        ParsedSymbol::UnresolvedLabel { label } => {
+                            label_requests.push(LabelRequest {
+                                offset_bits: self.program.len() * 8 + end,
+                                size_bits: part.len(),
+                                label,
+                            });
+                            -1
+                        },
+                    };
+
                     println!("Appending param {:03X}:{} to {}", value, part.len(), code);
-                    code.resize(code.len() + part.len(), false);
+                    code.resize(end + part.len(), false);
                     code[end..end + part.len()].store(value);
-                    end += part.len();
                 }
             }
+        }
+
+        for req in label_requests {
+            self.add_label_req(req);
         }
 
         println!("Converted instruction: {}", code);
         assert!(code.len() % 8 == 0);
 
-        let bytes = code.len() / 8;
-        for i in 0..bytes {
-            let byte: u8 = code[0 + i * 8..8 + i * 8].load();
-            self.program.push(byte);
-        }
-
-        Ok(())
+        Ok(code)
     }
 
     fn start_architecture_block(&mut self, mut line: &str) -> ParserResult<()> {
@@ -368,7 +433,7 @@ impl Parser {
             let symbol = SymbolType {
                 name: name.to_string(),
                 size,
-                symbols: variants,
+                variants,
             };
             println!("{:?}", symbol);
             self.arch_mut().add_symbol(symbol);
@@ -447,7 +512,7 @@ impl Parser {
         }
 
         self.arch_mut().instructions.push(Instr {
-            mnem: mnem.to_string(),
+            mnemonic: mnem.to_string(),
             params,
             encoding,
         });
@@ -483,7 +548,7 @@ impl Parser {
 
                 Param::Symbol {
                     name: param_name.to_string(),
-                    symbol: id,
+                    symbol_id: id,
                     limit,
                 }
             }
@@ -556,6 +621,8 @@ impl Parser {
 
         if result.is_ok() {
             *parent_line = line;
+        } else {
+            println!("Parsing failed");
         }
 
         result
@@ -670,36 +737,45 @@ impl Parser {
     }
     fn read_symbol_value(
         &self,
-        symbol: &SymbolType,
+        symbol_id: SymbolTypeId,
         limit: Option<Range<isize>>,
         parent_line: &mut &str,
-    ) -> ParserResult<isize> {
+    ) -> ParserResult<ParsedSymbol> {
         let mut line = *parent_line;
+
+        if symbol_id == SYMBOL_INT {
+            return self.read_number_literal(&mut line)
+                .map(|value| ParsedSymbol::Value(value));
+        }
+
         let token = read_token(&mut line);
+        let symbol = self.arch().get_symbol(symbol_id);
+        let found = symbol.get_variant(token);
 
-        let num = if symbol.name == "int" {
-            self.read_number_literal(&mut line)?
-        } else {
-            let found = symbol.symbols.get(token);
-
-            if found.is_none() {
-                return self.err(format!(
-                    "Unknown value '{}' of symbol {}. Expected one of {}.",
-                    token,
-                    symbol.name,
-                    symbol
-                        .symbols
-                        .keys()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+        if found.is_none() {
+            if symbol_id == SYMBOL_LABEL {
+                return Ok(ParsedSymbol::UnresolvedLabel {
+                    label: token.to_string(),
+                });
             }
-            *found.unwrap() as _
-        };
+
+            return self.err(format!(
+                "Unknown variant '{}' of symbol {}. Expected one of {}.",
+                token,
+                symbol.name,
+                symbol
+                    .variants
+                    .keys()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        let num = *found.unwrap() as isize;
 
         *parent_line = line;
-        Ok(num)
+        Ok(ParsedSymbol::Value(num))
     }
 
     fn parse_error(&self, message: String, cause: Option<ParserError>) -> ParserError {
@@ -713,6 +789,12 @@ impl Parser {
     }
     fn err_c<T>(&self, message: String, cause: ParserError) -> ParserResult<T> {
         Err(self.parse_error(message, Some(cause)))
+    }
+    fn add_label_req(&mut self, req: LabelRequest) {
+        if !self.label_requests.contains_key(&req.label) {
+            self.label_requests.insert(req.label.clone(), Vec::new());
+        }
+        self.label_requests.get_mut(&req.label).unwrap().push(req);
     }
 }
 
@@ -832,7 +914,7 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
     return result;
 }
 
-fn is_ident(token: &str) -> bool {
+fn is_identifier(token: &str) -> bool {
     token.len() > 0 && char::is_alphanumeric(token.chars().next().unwrap())
 }
 
@@ -840,7 +922,7 @@ fn is_ident(token: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{read_token, Arch, Encode, Param, Parser, SymbolType, SymbolTypeRef};
+    use crate::{read_token, Arch, Encode, Param, Parser, SymbolType, SymbolTypeId};
 
     fn setup_parser_empty() -> Parser {
         let mut parser = Parser::new();
@@ -849,7 +931,7 @@ mod tests {
         parser.arch_mut().add_symbol(SymbolType {
             name: "reg".to_string(),
             size: Some(5),
-            symbols: {
+            variants: {
                 let mut variants = HashMap::new();
                 variants.insert("r0".to_string(), 0);
                 variants.insert("r1".to_string(), 1);
@@ -877,11 +959,11 @@ mod tests {
 
         asm("#architecture simple1");
         asm("symbol reg[2] = r0 | r1 | r2 | r3");
-        asm("mnem mov $src:reg, $dst:reg ->   0000 $src $dst");
-        asm("mnem add $src:reg, $dst:reg ->   0010 $src $dst");
-        asm("mnem sub $src:reg, $dst:reg ->   0011 $src $dst");
-        asm("mnem li  $imm:int(-64:63) ->   01 $imm[5:0]");
-        asm("mnem jmp $imm:int(0:4000h) -> 10 $imm[13:0]");
+        asm("mnem mov $src:reg, $dst:reg -> 0000 $src $dst");
+        asm("mnem add $src:reg, $dst:reg -> 0010 $src $dst");
+        asm("mnem sub $src:reg, $dst:reg -> 0011 $src $dst");
+        asm("mnem li  $imm:int(-64:63)   -> 01 $imm[6:0]");
+        asm("mnem jmp $imm:label(0:4000h)-> 10 $imm[14:0]");
         asm("#end simple1");
 
         parser
@@ -958,7 +1040,7 @@ mod tests {
             parser.read_param(&mut input).unwrap(),
             Param::Symbol {
                 name: "test".to_string(),
-                symbol: SymbolTypeRef(2),
+                symbol_id: SymbolTypeId(2),
                 limit: None
             }
         );
@@ -966,7 +1048,7 @@ mod tests {
             parser.read_param(&mut input).unwrap(),
             Param::Symbol {
                 name: "arg".to_string(),
-                symbol: SymbolTypeRef(2),
+                symbol_id: SymbolTypeId(2),
                 limit: Some(0..1)
             }
         );
@@ -992,10 +1074,10 @@ mod tests {
         assert_eq!(reg.size, Some(2));
 
         let test = parser.arch().get_symbol_by_name("test").unwrap().0;
-        assert_eq!(test.symbols.get("r0"), Some(&0));
-        assert_eq!(test.symbols.get("r1"), Some(&1));
-        assert_eq!(test.symbols.get("hello"), Some(&10));
-        assert_eq!(test.symbols.get("world"), Some(&11));
+        assert_eq!(test.variants.get("r0"), Some(&0));
+        assert_eq!(test.variants.get("r1"), Some(&1));
+        assert_eq!(test.variants.get("hello"), Some(&10));
+        assert_eq!(test.variants.get("world"), Some(&11));
         assert_eq!(test.size, None);
     }
 
@@ -1010,16 +1092,16 @@ mod tests {
         asm("mnem sum $r0:reg, $r1:reg, $r2:reg, $r3:reg, $r4:reg -> 100100 $r0 $r1 $r2 $r3 $r4");
         asm("#end a1");
 
-        let ir = p.arch().get_ir_by_name("sum").unwrap().0;
+        let ir = p.arch().get_instr_by_name("sum").unwrap().0;
         let (_, reg2) = p.arch().get_symbol_by_name("reg").unwrap();
 
-        assert_eq!(ir.mnem, "sum");
+        assert_eq!(ir.mnemonic, "sum");
         assert_eq!(ir.params.len(), 9);
         assert_eq!(
             ir.params[0],
             Param::Symbol {
                 name: s("r0"),
-                symbol: reg2,
+                symbol_id: reg2,
                 limit: None
             }
         );
@@ -1028,7 +1110,7 @@ mod tests {
             ir.params[2],
             Param::Symbol {
                 name: s("r1"),
-                symbol: reg2,
+                symbol_id: reg2,
                 limit: None
             }
         );
@@ -1037,7 +1119,7 @@ mod tests {
             ir.params[4],
             Param::Symbol {
                 name: s("r2"),
-                symbol: reg2,
+                symbol_id: reg2,
                 limit: None
             }
         );
@@ -1046,7 +1128,7 @@ mod tests {
             ir.params[6],
             Param::Symbol {
                 name: s("r3"),
-                symbol: reg2,
+                symbol_id: reg2,
                 limit: None
             }
         );
@@ -1055,7 +1137,7 @@ mod tests {
             ir.params[8],
             Param::Symbol {
                 name: s("r4"),
-                symbol: reg2,
+                symbol_id: reg2,
                 limit: None
             }
         );
@@ -1079,9 +1161,9 @@ mod tests {
     fn mnemonic_params_encoded() {
         let p = setup_parser_mov();
 
-        let ir = p.arch().get_ir_by_name("mov").unwrap().0;
+        let ir = p.arch().get_instr_by_name("mov").unwrap().0;
 
-        assert_eq!(ir.mnem, "mov");
+        assert_eq!(ir.mnemonic, "mov");
         assert_eq!(ir.params.len(), 3);
 
         assert_eq!(ir.encoding.len(), 4);
@@ -1102,10 +1184,10 @@ mod tests {
         asm("mov r3 r0");
 
         assert_eq!(p.program.len(), 4);
-        assert_eq!(p.program[0], 0b01000101);
-        assert_eq!(p.program[1], 0b01001110);
-        assert_eq!(p.program[2], 0b01010111);
-        assert_eq!(p.program[3], 0b01011100);
+        assert_eq!(p.program[0], 0b010_00_1_01);
+        assert_eq!(p.program[1], 0b010_01_1_10);
+        assert_eq!(p.program[2], 0b010_10_1_11);
+        assert_eq!(p.program[3], 0b010_11_1_00);
     }
 
     #[test]
@@ -1137,5 +1219,10 @@ mod tests {
         asm("li 1");
         asm("skip:");
         asm("li 2");
+
+        assert_eq!(parser.program[0], 0b10_000000);
+        assert_eq!(parser.program[1], 0b00000011);
+        assert_eq!(parser.program[2], 0b01_000001);
+        assert_eq!(parser.program[3], 0b01_000010);
     }
 }
