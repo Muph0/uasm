@@ -3,9 +3,10 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error, Write, BufWriter};
+use std::io::{BufRead, BufReader, BufWriter, Error, Write};
 use std::num::ParseIntError;
 use std::ops::Range;
+use log::*;
 
 use crate::print_error;
 
@@ -143,9 +144,7 @@ struct LabelRequest {
 #[derive(Debug, Clone)]
 enum ParsedSymbol {
     Value(isize),
-    UnresolvedLabel {
-        label: String,
-    },
+    UnresolvedLabel { label: String },
 }
 
 pub struct Assembler {
@@ -171,28 +170,44 @@ impl Assembler {
         }
     }
     pub fn accept_file(&mut self, filename: &str) -> ParserResult<()> {
-        let file = File::open("examples/riscv32i.arch")?;
+        let file = File::open(filename)?;
         let reader = BufReader::new(file);
 
+        let mut ok = true;
         let mut i = 0;
         for line in reader.lines() {
             i += 1;
             let result = self.accept_line(&line?);
 
             match result {
-                Err(e) => print_error(&format!("line {i}: {e}")),
+                Err(e) => {
+                    print_error(&format!("{filename}:{i}: {e}"));
+                    ok = false;
+                }
                 _ => (),
             }
         }
-        Ok(())
+
+        if ok {
+            Ok(())
+        } else {
+            Err(ParserError {
+                message: "Parsing has failed".to_string(),
+                cause: None,
+            })
+        }
     }
     pub fn write_output(&mut self, filename: &str) -> ParserResult<()> {
         let mut file = File::create(filename)?;
-        let writer = BufWriter::new(file);
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&self.program)?;
+        writer.flush()?;
+
         Ok(())
     }
     fn accept_line(&mut self, line: &str) -> ParserResult<()> {
-        if line.is_empty() {
+        let token = read_token_peek(line);
+        if token.is_empty() {
             return Ok(());
         }
 
@@ -216,14 +231,10 @@ impl Assembler {
     }
 
     fn accept_program_line(&mut self, mut line: &str) -> ParserResult<()> {
-        println!("Program line: {}", line);
+        debug!("Program line: {}", line);
         let mut token = read_token(&mut line);
         if token == "#" {
             return self.accept_program_directive(line);
-        } else if token == "--" {
-            // comment
-            println!("Comment: {}", line);
-            return Ok(());
         }
 
         if is_identifier(token) {
@@ -269,7 +280,7 @@ impl Assembler {
         ))
     }
     fn accept_program_directive(&mut self, mut line: &str) -> ParserResult<()> {
-        println!("Program directive: {}", line);
+        debug!("Program directive: {}", line);
         let token = read_token(&mut line);
 
         match token {
@@ -281,7 +292,7 @@ impl Assembler {
         }
     }
     fn accept_directive_use(&mut self, mut line: &str) -> ParserResult<()> {
-        let token = self.read_indentifier(&mut line)?;
+        let token = self.read_identifier(&mut line)?;
         if let Some(arch) = self.arch_names.get(token) {
             self.current_arch = arch.0;
         } else {
@@ -290,7 +301,7 @@ impl Assembler {
         self.read_eol(&mut line)
     }
     fn accept_program_label(&mut self, label: &str) -> ParserResult<()> {
-        println!("Label: {}", label);
+        debug!("Label: {}", label);
 
         let value = self.program.len();
 
@@ -305,15 +316,19 @@ impl Assembler {
                 let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
                 let offset = req.offset_bits;
                 let size = req.size_bits;
-                println!("{:?}", program_bits);
+                trace!("{:?}", program_bits);
                 program_bits[offset..offset + size].store_be(value);
-                println!("{:?}", program_bits);
+                trace!("{:?}", program_bits);
             }
         }
 
         Ok(())
     }
-    fn accept_program_instr(&mut self, ir: InstrId, mut line: &str) -> ParserResult<BitVec<usize, Msb0>> {
+    fn accept_program_instr(
+        &mut self,
+        ir: InstrId,
+        mut line: &str,
+    ) -> ParserResult<BitVec<usize, Msb0>> {
         let mut parsed_params = Vec::<ParsedSymbol>::new();
 
         for expect_param in &self.arch().get_ir(ir).params {
@@ -339,7 +354,7 @@ impl Assembler {
         for frag in &ir.encoding {
             match frag {
                 Encode::Bits { value, size } => {
-                    println!("Appending const {:03X}:{} to {}", value, size, code);
+                    debug!("Appending const {:03X}:{} to {}", value, size, code);
                     let end = code.len();
                     code.resize(end + size, false);
                     code[end..end + size].store_be(*value);
@@ -347,7 +362,7 @@ impl Assembler {
                 Encode::Param { id, part } => {
                     if *id >= parsed_params.len() {
                         return self.err(format!(
-                            "A parameter #{id} expected, but only parsed total of {}.",
+                            "A parameter #{id} expected, but only parsed total of {}",
                             parsed_params.len()
                         ));
                     }
@@ -364,10 +379,10 @@ impl Assembler {
                                 label,
                             });
                             -1
-                        },
+                        }
                     };
 
-                    println!("Appending param {:03X}:{} to {}", value, part.len(), code);
+                    debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
                     code[end..end + part.len()].store(value);
                 }
@@ -378,7 +393,7 @@ impl Assembler {
             self.add_label_req(req);
         }
 
-        println!("Converted instruction: {}", code);
+        debug!("Converted instruction: {}", code);
         assert!(code.len() % 8 == 0);
 
         Ok(code)
@@ -387,7 +402,7 @@ impl Assembler {
     fn start_architecture_block(&mut self, mut line: &str) -> ParserResult<()> {
         self.block = CodeBlock::Architecture;
         self.current_arch = self.architectures.len();
-        let name = self.read_indentifier(&mut line)?;
+        let name = self.read_identifier(&mut line)?;
         self.architectures.push(Arch::new(name));
         Ok(())
     }
@@ -403,7 +418,7 @@ impl Assembler {
     }
     fn accept_symbol_line(&mut self, mut my_line: &str) -> ParserResult<()> {
         let line = &mut my_line;
-        let name = self.read_indentifier(line)?;
+        let name = self.read_identifier(line)?;
         let size = self.read_size_opt(line)?;
 
         self.read_exact("=", line)?;
@@ -411,7 +426,7 @@ impl Assembler {
 
         let mut auto_inc = 0;
         loop {
-            let variant = self.read_indentifier(line)?;
+            let variant = self.read_identifier(line)?;
             let value = match self.read_exact(":", line) {
                 Ok(_) => self.read_number_literal(line)?,
                 Err(_) => auto_inc,
@@ -420,7 +435,7 @@ impl Assembler {
 
             if variants.contains_key(variant) {
                 return Err(ParserError::new(&format!(
-                    "Duplicate variant '{variant}' in symbol '{name}'."
+                    "Duplicate variant '{variant}' in symbol '{name}'"
                 )));
             }
             variants.insert(variant.to_string(), value as _);
@@ -437,7 +452,7 @@ impl Assembler {
                 size,
                 variants,
             };
-            println!("{:?}", symbol);
+            debug!("symbol {:?}", symbol);
             self.arch_mut().add_symbol(symbol);
         }
         Ok(())
@@ -453,7 +468,7 @@ impl Assembler {
             match token {
                 "" => {
                     return self.err(format!(
-                        "Expected '->' followed by instruction encoding but found end of line."
+                        "Expected '->' followed by instruction encoding but found end of line"
                     ))
                 }
                 "->" => break,
@@ -476,7 +491,7 @@ impl Assembler {
             }
             let enc = match token {
                 "$" => {
-                    let token = self.read_indentifier(line)?;
+                    let token = self.read_identifier(line)?;
 
                     let param_id = params
                         .iter()
@@ -494,7 +509,7 @@ impl Assembler {
                         None => {
                             return self.err(format!(
                                 "Parameter ${token} is unsized and no explicit size was provided. \
-                            Use ${token}[i:j] to specify, what bits should be encoded."
+                            Use ${token}[i:j] to specify, what bits should be encoded"
                             ))
                         }
                     };
@@ -535,12 +550,12 @@ impl Assembler {
 
         let param = match token {
             "$" => {
-                let param_name = self.read_indentifier(&mut line)?;
+                let param_name = self.read_identifier(&mut line)?;
                 self.read_exact(":", &mut line)?;
 
-                let symbol_name = self.read_indentifier(&mut line)?;
+                let symbol_name = self.read_identifier(&mut line)?;
                 let (symbol, id) = self.arch().get_symbol_by_name(symbol_name).ok_or(
-                    self.parse_error(format!("Unknown symbol name '{symbol_name}'."), None),
+                    self.parse_error(format!("Unknown symbol name '{symbol_name}'"), None),
                 )?;
 
                 let token = read_token_peek(line);
@@ -571,7 +586,7 @@ impl Assembler {
             Ok(())
         } else {
             Err(ParserError {
-                message: format!("Expected token '{expect}' but found '{token}'."),
+                message: format!("Expected token '{expect}' but found '{token}'"),
                 cause: None,
             })
         }
@@ -585,7 +600,7 @@ impl Assembler {
             }),
         }
     }
-    fn read_indentifier<'a>(&self, parent_line: &mut &'a str) -> ParserResult<&'a str> {
+    fn read_identifier<'a>(&self, parent_line: &mut &'a str) -> ParserResult<&'a str> {
         let mut line = *parent_line;
         let token = read_token(&mut line);
         let valid = match token.chars().next() {
@@ -598,7 +613,7 @@ impl Assembler {
             Ok(token)
         } else {
             Err(ParserError {
-                message: format!("Expected indentifier but found '{token}'."),
+                message: format!("Expected indentifier but found \"{token}\""),
                 cause: None,
             })
         }
@@ -623,14 +638,12 @@ impl Assembler {
 
         if result.is_ok() {
             *parent_line = line;
-        } else {
-            println!("Parsing failed");
         }
 
         result
             .map(|val| if !neg { val } else { -val })
             .map_err(|e| ParserError {
-                message: format!("Invalid number literal '{token}'."),
+                message: format!("Invalid number literal \"{token}\""),
                 cause: Some(Box::new(e.into())),
             })
     }
@@ -661,7 +674,7 @@ impl Assembler {
 
         if range.start < 0 || range.end < 0 {
             return self.err(format!(
-                "Negative range {}:{} not allowed.",
+                "Negative range {}:{} not allowed",
                 range.end, range.start
             ));
         }
@@ -716,7 +729,7 @@ impl Assembler {
 
                 if size < 0 {
                     return Err(ParserError::new(&format!(
-                        "Negative size [{size}] is not allowed."
+                        "Negative size [{size}] is not allowed"
                     )));
                 }
                 *parent_line = line;
@@ -734,23 +747,31 @@ impl Assembler {
                 *parent_line = line;
                 return Ok(i);
             }
-            None => self.err(format!("Expected one of {:?}, found '{token}'.", options)),
+            None => self.err(format!("Expected one of {:?}, found '{token}'", options)),
         }
     }
     fn read_symbol_value(
         &self,
-        symbol_id: SymbolTypeId,
+        mut symbol_id: SymbolTypeId,
         limit: Option<Range<isize>>,
         parent_line: &mut &str,
     ) -> ParserResult<ParsedSymbol> {
         let mut line = *parent_line;
 
+        let mut token = read_token_peek(line);
+        if let Some((_, id)) = self.arch().get_symbol_by_name(token) {
+            self.read_exact(token, &mut line)?;
+            self.read_exact(":", &mut line)?;
+            symbol_id = id;
+        }
+
         if symbol_id == SYMBOL_INT {
-            return self.read_number_literal(&mut line)
+            return self
+                .read_number_literal(&mut line)
                 .map(|value| ParsedSymbol::Value(value));
         }
 
-        let token = read_token(&mut line);
+        token = self.read_identifier(&mut line)?;
         let symbol = self.arch().get_symbol(symbol_id);
         let found = symbol.get_variant(token);
 
@@ -762,7 +783,7 @@ impl Assembler {
             }
 
             return self.err(format!(
-                "Unknown variant '{}' of symbol {}. Expected one of {}.",
+                "Unknown variant \"{}\" of symbol {}. Expected one of {}",
                 token,
                 symbol.name,
                 symbol
@@ -817,7 +838,9 @@ impl Display for ParserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)?;
         if let Some(ref reason) = self.cause {
-            f.write_fmt(format_args!("Caused by: {}", reason.as_ref()))?;
+            f.write_fmt(format_args!(", {}", reason.as_ref()))?;
+        } else {
+            f.write_str(".");
         }
         Ok(())
     }
@@ -904,7 +927,11 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
                 }
             }
             State::Minus => match c {
-                '>' | '-' => State::Symbol,
+                '>' => State::Symbol,
+                '-' => {
+                    len = 0;
+                    State::Done
+                }
                 _ => State::Done,
             },
             State::Symbol => State::Done,
@@ -921,7 +948,7 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
     let result = &text[start..end];
 
     *text = &text[end..];
-    return result;
+    result
 }
 
 fn is_identifier(token: &str) -> bool {
@@ -932,7 +959,7 @@ fn is_identifier(token: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::asm::{read_token, Arch, Encode, Param, Assembler, SymbolType, SymbolTypeId};
+    use crate::asm::{read_token, Arch, Assembler, Encode, Param, SymbolType, SymbolTypeId};
 
     fn setup_parser_empty() -> Assembler {
         let mut parser = Assembler::new();
