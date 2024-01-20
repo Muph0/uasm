@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/uasm.exe",
             "args": [
-                "./examples/omega/omega.arch"
+                "C:/Users/kytka/source/recreation/CPUs/omega/program.u"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

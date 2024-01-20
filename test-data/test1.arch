@@ -1,0 +1,6 @@
+
+.architecture test1
+
+mnem nop -> 1000 0000
+
+.end test1
