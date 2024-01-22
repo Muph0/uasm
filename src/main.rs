@@ -2,11 +2,14 @@
 
 mod asm;
 mod cli;
+mod error;
+mod expr;
 
 use std::{env, path::Path, fs::File, io::{BufWriter, Write}, fmt::Display};
 
-use asm::{Assembler, AsmError};
+use asm::{Assembler};
 use cli::CliArgs;
+use error::AsmError;
 
 fn print_error<T: Display>(msg: T) {
     println!("\x1B[1;31merror:\x1B[0m {}", msg);
