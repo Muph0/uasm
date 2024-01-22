@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::string::ParseError;
 use std::{default, fs};
 
+use crate::error::{AsmError, LocError};
 use crate::print_error;
 
 pub type AsmResult<T> = Result<T, AsmError>;
@@ -139,10 +140,10 @@ enum Param {
     },
 }
 impl Param {
-    pub fn token(&self) -> &str {
+    pub fn name(&self) -> Option<&str> {
         match self {
-            Param::Symbol { name, .. } => name,
-            Param::Token { value, .. } => value,
+            Param::Symbol { name, .. } => Some(name),
+            Param::Token { .. } => None,
         }
     }
     pub fn size(&self, symbol_table: &Vec<SymbolType>) -> Option<usize> {
@@ -161,14 +162,17 @@ enum Encode {
     Param { id: usize, part: Range<usize> },
 }
 
+/// An unresolved label to be resolved later
 struct LabelRequest {
+    /// Where to write
     offset_bits: usize,
-    size_bits: usize,
+    /// Which part of the label to write here.
+    part: Range<usize>,
     label: String,
 }
 
 #[derive(Debug, Clone)]
-enum ParsedSymbol {
+enum ParsedParam {
     Value(isize),
     UnresolvedLabel { label: String },
 }
@@ -395,9 +399,9 @@ impl Assembler {
                 // rewrite
                 let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
                 let offset = req.offset_bits;
-                let size = req.size_bits;
+                let part = req.part;
                 trace!("{:?}", program_bits);
-                program_bits[offset..offset + size].store_be(value);
+                program_bits[offset..offset + part.len()].store_be(value >> part.start);
                 trace!("{:?}", program_bits);
             }
         }
@@ -406,12 +410,13 @@ impl Assembler {
     }
     fn accept_program_instr(
         &mut self,
-        ir: InstrId,
+        ir_id: InstrId,
         mut line: &str,
     ) -> AsmResult<BitVec<usize, Msb0>> {
-        let mut parsed_params = Vec::<ParsedSymbol>::new();
+        let mut parsed_params = Vec::<ParsedParam>::new();
 
-        for expect_param in &self.arch()?.get_ir(ir).params {
+        let ir = self.arch()?.get_ir(ir_id);
+        for expect_param in &ir.params {
             match expect_param {
                 Param::Token { value } => {
                     self.read_exact(value.as_str(), &mut line);
@@ -430,7 +435,6 @@ impl Assembler {
         // generate binary code
         let mut code: BitVec<usize, Msb0> = BitVec::with_capacity(1);
         let mut label_requests = Vec::new();
-        let ir = self.arch()?.get_ir(ir);
         for frag in &ir.encoding {
             match frag {
                 Encode::Bits { value, size } => {
@@ -452,11 +456,11 @@ impl Assembler {
                     let end = code.len();
 
                     let value = match parsed {
-                        ParsedSymbol::Value(value) => value,
-                        ParsedSymbol::UnresolvedLabel { label } => {
+                        ParsedParam::Value(value) => value,
+                        ParsedParam::UnresolvedLabel { label } => {
                             label_requests.push(LabelRequest {
                                 offset_bits: self.program.len() * 8 + end,
-                                size_bits: part.len(),
+                                part: part.clone(),
                                 label,
                             });
                             -1
@@ -465,7 +469,7 @@ impl Assembler {
 
                     debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
-                    code[end..end + part.len()].store(value);
+                    code[end..end + part.len()].store_be(value >> part.start);
                 }
             }
         }
@@ -546,29 +550,37 @@ impl Assembler {
         let mnem = read_token(line);
 
         let mut params = Vec::<Param>::new();
-        loop {
-            let token = read_token_peek(*line);
-
-            match token {
-                "" => {
-                    return Err(format!(
-                        "Expected '->' followed by instruction encoding but found end of line"
-                    )
-                    .into())
+        let mut param_ids = Vec::<Option<usize>>::new();
+        {
+            let mut i = 0;
+            loop {
+                let token = read_token_peek(*line);
+                match token {
+                    "" => {
+                        return Err(format!(
+                            "Expected '->' followed by instruction encoding but found end of line"
+                        )
+                        .into())
+                    }
+                    TOK_REWRITE => break,
+                    _ => (),
+                };
+                let param = self.read_param(line)?;
+                match &param {
+                    Param::Symbol { .. } => {
+                        param_ids.push(Some(i));
+                        i += 1;
+                    }
+                    Param::Token { .. } => param_ids.push(None),
                 }
-                TOK_REWRITE => break,
-                _ => (),
-            };
-
-            let param = self.read_param(line)?;
-            params.push(param);
+                params.push(param);
+            }
         }
 
         self.read_exact(TOK_REWRITE, line)?;
         let size = self.read_size_opt(line);
 
         let mut encoding = Vec::<Encode>::new();
-        let mut encode_params = 0;
         loop {
             let token = read_token(line);
             if token.is_empty() {
@@ -576,34 +588,41 @@ impl Assembler {
             }
             let enc = match token {
                 "$" => {
-                    let token = self.read_identifier(line)?;
+                    let name = self.read_identifier(line)?;
 
-                    let param_id = params
+                    // NOTE: param ids skip tokens, so always ord >= id
+                    let param_ord = params
                         .iter()
-                        .position(|p| p.token() == token)
-                        .ok_or(format!("Unknown parameter '${token}'"))?;
-                    let param = &params[param_id];
+                        .position(|p| p.name() == Some(name))
+                        .ok_or(format!("Unknown parameter '${name}'"))?;
+
+                    let param: &Param = &params[param_ord];
+                    let (symbol_id, x) = match param {
+                        Param::Symbol {
+                            symbol_id, limit, ..
+                        } => (symbol_id, limit),
+                        _ => panic!("\"{name}\" must be a symbol param."),
+                    };
+                    let param_id = param_ids[param_ord].unwrap();
                     let param_size = param.size(&self.arch()?.symbol_table);
 
                     let part = self
                         .read_brackets_opt(TOK_SIZE_OPEN, TOK_SIZE_CLOSE, line, |s, line| {
-                            s.read_urange(line)
+                            s.read_urange(line, true)
                         })?
-                        .or(param_size.map(|size| 0..size));
+                        .or(param_size.map(|s| 0..s));
 
                     let part = match part {
                         Some(range) => range,
                         None => {
+                            let tname = &self.arch()?.get_symbol(*symbol_id).name;
                             return Err(format!(
-                                "Parameter ${token} is unsized and no explicit size was provided. \
-                            Use ${token}[i:j] to specify, what bits should be encoded"
+                                "Type {tname} of parameter ${token} is unsized and no explicit size was provided. Use ${token}[i:j] to specify, what bits should be encoded"
                             )
                             .into());
                         }
                     };
-                    let id = encode_params;
-                    encode_params += 1;
-                    Encode::Param { id, part }
+                    Encode::Param { id: param_id, part }
                 }
                 _ => {
                     let bits = usize::from_str_radix(token, 2)?;
@@ -650,7 +669,7 @@ impl Assembler {
                 let token = read_token_peek(line);
                 let limit = self
                     .read_brackets_opt(TOK_LIMIT_OPEN, TOK_LIMIT_CLOSE, &mut line, |s, line| {
-                        s.read_irange(line)
+                        s.read_irange(line, false, false)
                     })?
                     .map(|lim| lim.start.min(lim.end)..lim.start.max(lim.end));
 
@@ -750,22 +769,35 @@ impl Assembler {
         *parent_line = line;
         Ok(SizedInt { size, value })
     }
-    fn read_irange(&self, parent_line: &mut &str) -> AsmResult<Range<isize>> {
+    fn read_irange(
+        &self,
+        parent_line: &mut &str,
+        reverse: bool,
+        unsigned: bool,
+    ) -> AsmResult<Range<isize>> {
         let mut line = *parent_line;
-        let upper = self.read_number_literal(&mut line)?;
+        let a = self.read_number_literal(&mut line)?;
         self.read_exact(TOK_RANGE_SEP, &mut line)?;
-        let lower = self.read_number_literal(&mut line)?;
+        let b = self.read_number_literal(&mut line)?;
+
+        let range = match reverse {
+            false => a..(b + 1),
+            true => b..(a + 1),
+        };
+
+        if unsigned && (range.start < 0 || range.end < 0) {
+            return Err(format!("Negative range {a}:{b} not allowed here").into());
+        }
+        if range.start >= range.end {
+            return Err(format!("Empty or negative-sized range {a}:{b} is not allowed").into());
+        }
 
         *parent_line = line;
-        return Ok(lower..upper);
+        Ok(range)
     }
-    fn read_urange(&self, parent_line: &mut &str) -> AsmResult<Range<usize>> {
+    fn read_urange(&self, parent_line: &mut &str, reverse: bool) -> AsmResult<Range<usize>> {
         let mut line = *parent_line;
-        let range = self.read_irange(&mut line)?;
-
-        if range.start < 0 || range.end < 0 {
-            return Err(format!("Negative range {}:{} not allowed", range.end, range.start).into());
-        }
+        let range = self.read_irange(&mut line, reverse, true)?;
 
         *parent_line = line;
         return Ok((range.start as usize)..(range.end as usize));
@@ -843,7 +875,7 @@ impl Assembler {
         mut symbol_id: SymbolTypeId,
         limit: Option<Range<isize>>,
         parent_line: &mut &str,
-    ) -> AsmResult<ParsedSymbol> {
+    ) -> AsmResult<ParsedParam> {
         let mut line = *parent_line;
 
         let mut token = read_token_peek(line);
@@ -856,7 +888,7 @@ impl Assembler {
         if symbol_id == SYMBOL_INT {
             return self
                 .read_number_literal(&mut line)
-                .map(|value| ParsedSymbol::Value(value));
+                .map(|value| ParsedParam::Value(value));
         }
 
         token = self.read_identifier(&mut line)?;
@@ -865,7 +897,7 @@ impl Assembler {
 
         if found.is_none() {
             if symbol_id == SYMBOL_LABEL {
-                return Ok(ParsedSymbol::UnresolvedLabel {
+                return Ok(ParsedParam::UnresolvedLabel {
                     label: token.to_string(),
                 });
             }
@@ -887,7 +919,7 @@ impl Assembler {
         let num = *found.unwrap() as isize;
 
         *parent_line = line;
-        Ok(ParsedSymbol::Value(num))
+        Ok(ParsedParam::Value(num))
     }
     fn read_str_lit<'a>(&self, parent_line: &mut &'a str) -> AsmResult<&'a str> {
         let mut line = *parent_line;
@@ -924,85 +956,6 @@ impl Assembler {
             file: self.file_stack.last().map(|s| s.clone()),
             line: self.lineno,
         }]
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct AsmError {
-    pub message: String,
-    pub cause: Option<Box<AsmError>>,
-}
-impl AsmError {
-    fn new(text: &str) -> Self {
-        Self {
-            message: text.to_string(),
-            cause: None,
-        }
-    }
-
-    fn wrap_str(self, arg: &str) -> Self {
-        self.wrap(arg.to_string())
-    }
-    fn wrap(self, arg: String) -> Self {
-        AsmError {
-            message: arg,
-            cause: Some(Box::new(self)),
-        }
-    }
-}
-impl Display for AsmError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)?;
-        if let Some(ref reason) = self.cause {
-            f.write_fmt(format_args!(", {}", reason.as_ref()))?;
-        } else {
-            f.write_str(".");
-        }
-        Ok(())
-    }
-}
-impl From<&str> for AsmError {
-    fn from(value: &str) -> Self {
-        AsmError::new(value)
-    }
-}
-impl From<String> for AsmError {
-    fn from(value: String) -> Self {
-        AsmError {
-            message: value,
-            cause: None,
-        }
-    }
-}
-impl From<ParseIntError> for AsmError {
-    fn from(value: ParseIntError) -> Self {
-        format!("{value}").into()
-    }
-}
-impl From<std::io::Error> for AsmError {
-    fn from(value: std::io::Error) -> Self {
-        format!("{value}").into()
-    }
-}
-
-#[derive(Debug)]
-pub struct LocError {
-    error: AsmError,
-    file: Option<String>,
-    line: usize,
-}
-impl Display for LocError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ref file) = self.file {
-            f.write_fmt(format_args!("{}:{}: {}", file, self.line, self.error))
-        } else {
-            f.write_fmt(format_args!("{}", self.error))
-        }
-    }
-}
-impl From<LocError> for Vec<LocError> {
-    fn from(value: LocError) -> Self {
-        vec![value]
     }
 }
 
@@ -1149,8 +1102,8 @@ mod tests {
         asm("mnem mov $src:reg, $dst:reg -> 0000 $src $dst");
         asm("mnem add $src:reg, $dst:reg -> 0010 $src $dst");
         asm("mnem sub $src:reg, $dst:reg -> 0011 $src $dst");
-        asm("mnem li  $imm:int(-64:63)   -> 01 $imm[6:0]");
-        asm("mnem jmp $imm:label(0:4000h)-> 10 $imm[14:0]");
+        asm("mnem li  $imm:int(-64:63)   -> 01 $imm[5:0]");
+        asm("mnem jmp $imm:label(0:4000h)-> 10 $imm[13:0]");
         asm("mnem nop                    -> 1111 1111");
         asm(".end simple1");
 
@@ -1212,12 +1165,24 @@ mod tests {
 
     #[test]
     fn range_is_correctly_parsed() {
-        let mut input = "ranges 1:0 0:1";
+        let mut input = "ranges 10:0 0:10 0:99 -10:9 9:-10";
         let parser = setup_parser_empty();
 
         assert_eq!(read_token(&mut input), "ranges");
-        assert_eq!(parser.read_irange(&mut input).unwrap(), 0..1);
-        assert_eq!(parser.read_irange(&mut input).unwrap(), 1..0);
+        assert_eq!(parser.read_irange(&mut input, true, false).unwrap(), 0..11);
+        assert_eq!(parser.read_irange(&mut input, false, false).unwrap(), 0..11);
+        assert_eq!(
+            parser.read_irange(&mut input, false, false).unwrap(),
+            0..100
+        );
+        assert_eq!(
+            parser.read_irange(&mut input, false, false).unwrap(),
+            -10..10
+        );
+        assert_eq!(
+            parser.read_irange(&mut input, true, false).unwrap(),
+            -10..10
+        );
         assert_eq!(read_token(&mut input).is_empty(), true);
     }
 
@@ -1239,7 +1204,7 @@ mod tests {
             Param::Symbol {
                 name: "arg".to_string(),
                 symbol_id: SymbolTypeId(2),
-                limit: Some(0..1)
+                limit: Some(0..2)
             }
         );
     }
@@ -1425,6 +1390,32 @@ mod tests {
         assert_eq!(parser.program[7], 0b1111_1111);
         assert_eq!(parser.program[8], 0b1111_1111);
         assert_eq!(parser.program.len(), 9);
+    }
+
+    #[test]
+    fn parameter_part_not_zero() {
+        let mut parser = Assembler::new();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm(".architecture a1");
+        asm("mnem test $a:int -> $a[7:4] 0000");
+        asm(".end a1");
+        asm("test A0h");
+
+        assert_eq!(parser.program[0], 0b10100000);
+    }
+
+    #[test]
+    fn parameter_part_repeat() {
+        let mut parser = Assembler::new();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm(".architecture a1");
+        asm("mnem test x y $a:int z w -> $a[7:6] $a[7:6] $a[7:6] $a[7:6]");
+        asm(".end a1");
+        asm("test x y 80h z w");
+
+        assert_eq!(parser.program[0], 0b10101010);
     }
 
     #[test]
