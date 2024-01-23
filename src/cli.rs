@@ -1,6 +1,14 @@
 use clap::Parser;
 
+#[cfg(debug_assertions)]
+const VERSION: &str = "0.1.0 debug";
+
+#[cfg(not(debug_assertions))]
+const VERSION: &str = "0.1.0 release";
+
+
 #[derive(Parser, Debug)]
+#[command(author, version = Some(VERSION), about, long_about = None)]
 pub struct CliArgs {
     pub input: String,
 

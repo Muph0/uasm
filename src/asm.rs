@@ -1,5 +1,4 @@
 use bitvec::prelude::*;
-use clap::Parser;
 use log::*;
 use std::collections::HashMap;
 use std::fmt::{Display, Write};
@@ -158,8 +157,15 @@ impl Param {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Encode {
-    Bits { value: usize, size: usize },
-    Param { id: usize, part: Range<usize> },
+    Bits {
+        value: usize,
+        size: usize,
+    },
+    Param {
+        id: usize,
+        part: Range<usize>,
+        rel: bool,
+    },
 }
 
 /// An unresolved label to be resolved later
@@ -305,7 +311,7 @@ impl Assembler {
                 self.accept_program_label(token).map_err(|e| self.err(e))?;
                 token = read_token(&mut line);
 
-                if line.is_empty() {
+                if token.is_empty() {
                     return Ok(());
                 }
             }
@@ -443,7 +449,7 @@ impl Assembler {
                     code.resize(end + size, false);
                     code[end..end + size].store_be(*value);
                 }
-                Encode::Param { id, part } => {
+                Encode::Param { id, part, rel } => {
                     if *id >= parsed_params.len() {
                         return Err(format!(
                             "A parameter #{id} expected, but only parsed total of {}",
@@ -455,7 +461,7 @@ impl Assembler {
                     let parsed = parsed_params[*id].clone();
                     let end = code.len();
 
-                    let value = match parsed {
+                    let mut value = match parsed {
                         ParsedParam::Value(value) => value,
                         ParsedParam::UnresolvedLabel { label } => {
                             label_requests.push(LabelRequest {
@@ -465,7 +471,7 @@ impl Assembler {
                             });
                             -1
                         }
-                    };
+                    } - iff(*rel, self.program.len() as isize, 0);
 
                     debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
@@ -612,17 +618,26 @@ impl Assembler {
                         })?
                         .or(param_size.map(|s| 0..s));
 
+                    let rel = read_token_peek(&line) == TOK_RELATIVE;
+                    if rel {
+                        read_token(line);
+                    }
+
                     let part = match part {
                         Some(range) => range,
                         None => {
                             let tname = &self.arch()?.get_symbol(*symbol_id).name;
                             return Err(format!(
-                                "Type {tname} of parameter ${token} is unsized and no explicit size was provided. Use ${token}[i:j] to specify, what bits should be encoded"
+                                "Type {tname} of parameter ${name} is unsized and no explicit size was provided. Use ${name}[i:j] to specify, what bits should be encoded"
                             )
                             .into());
                         }
                     };
-                    Encode::Param { id: param_id, part }
+                    Encode::Param {
+                        id: param_id,
+                        part,
+                        rel,
+                    }
                 }
                 _ => {
                     let bits = usize::from_str_radix(token, 2)?;
@@ -666,7 +681,6 @@ impl Assembler {
                     .get_symbol_by_name(symbol_name)
                     .ok_or(format!("Unknown symbol name '{symbol_name}'"))?;
 
-                let token = read_token_peek(line);
                 let limit = self
                     .read_brackets_opt(TOK_LIMIT_OPEN, TOK_LIMIT_CLOSE, &mut line, |s, line| {
                         s.read_irange(line, false, false)
@@ -1058,6 +1072,13 @@ fn is_identifier(token: &str) -> bool {
     token.len() > 0 && char::is_alphanumeric(token.chars().next().unwrap())
 }
 
+fn iff<Bool: Into<bool>, T>(b: Bool, yes: T, no: T) -> T {
+    match b.into() {
+        true => yes,
+        false => no,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1089,6 +1110,7 @@ mod tests {
         asm(".architecture a1");
         asm("symbol reg[2] = r0 | r1 | r2 | r3");
         asm("mnem mov $rd:reg, $rs:reg -> 010 $rd 1 $rs");
+        asm("mnem nop -> 0000 0000");
         asm(".end a1");
 
         parser
@@ -1305,11 +1327,46 @@ mod tests {
                 size: 6
             }
         );
-        assert_eq!(ir.encoding[1], Encode::Param { id: 0, part: 0..2 });
-        assert_eq!(ir.encoding[2], Encode::Param { id: 1, part: 0..2 });
-        assert_eq!(ir.encoding[3], Encode::Param { id: 2, part: 0..2 });
-        assert_eq!(ir.encoding[4], Encode::Param { id: 3, part: 0..2 });
-        assert_eq!(ir.encoding[5], Encode::Param { id: 4, part: 0..2 });
+        assert_eq!(
+            ir.encoding[1],
+            Encode::Param {
+                id: 0,
+                part: 0..2,
+                rel: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[2],
+            Encode::Param {
+                id: 1,
+                part: 0..2,
+                rel: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[3],
+            Encode::Param {
+                id: 2,
+                part: 0..2,
+                rel: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[4],
+            Encode::Param {
+                id: 3,
+                part: 0..2,
+                rel: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[5],
+            Encode::Param {
+                id: 4,
+                part: 0..2,
+                rel: false
+            }
+        );
     }
 
     #[test]
@@ -1323,9 +1380,23 @@ mod tests {
 
         assert_eq!(ir.encoding.len(), 4);
         assert_eq!(ir.encoding[0], Encode::Bits { value: 2, size: 3 });
-        assert_eq!(ir.encoding[1], Encode::Param { id: 0, part: 0..2 });
+        assert_eq!(
+            ir.encoding[1],
+            Encode::Param {
+                id: 0,
+                part: 0..2,
+                rel: false
+            }
+        );
         assert_eq!(ir.encoding[2], Encode::Bits { value: 1, size: 1 });
-        assert_eq!(ir.encoding[3], Encode::Param { id: 1, part: 0..2 });
+        assert_eq!(
+            ir.encoding[3],
+            Encode::Param {
+                id: 1,
+                part: 0..2,
+                rel: false
+            }
+        );
     }
 
     #[test]
@@ -1343,6 +1414,29 @@ mod tests {
         assert_eq!(p.program[1], 0b010_01_1_10);
         assert_eq!(p.program[2], 0b010_10_1_11);
         assert_eq!(p.program[3], 0b010_11_1_00);
+    }
+
+    #[test]
+    fn label_before_mnemonic_parsed() {
+        let mut p = setup_parser_mov();
+        let mut asm = |line| p.accept_line(line).unwrap();
+
+        asm("a: nop");
+        asm("b: mov r1 r2");
+        asm("c: mov r2 r3");
+        asm("d: mov r3 r0");
+
+        assert_eq!(p.program.len(), 4);
+        assert_eq!(p.program[0], 0);
+        assert_eq!(p.program[1], 0b010_01_1_10);
+        assert_eq!(p.program[2], 0b010_10_1_11);
+        assert_eq!(p.program[3], 0b010_11_1_00);
+
+        let label = p.arch().unwrap().get_symbol(SYMBOL_LABEL);
+        assert!(label.get_variant("a").is_some());
+        assert!(label.get_variant("b").is_some());
+        assert!(label.get_variant("c").is_some());
+        assert!(label.get_variant("d").is_some());
     }
 
     #[test]
@@ -1389,7 +1483,8 @@ mod tests {
         assert_eq!(parser.program[6], 0b00001000);
         assert_eq!(parser.program[7], 0b1111_1111);
         assert_eq!(parser.program[8], 0b1111_1111);
-        assert_eq!(parser.program.len(), 9);
+        assert_eq!(parser.program[8], 0b1111_1111);
+        assert_eq!(parser.program.len(), 10);
     }
 
     #[test]
@@ -1419,6 +1514,21 @@ mod tests {
     }
 
     #[test]
+    fn parameter_relative_repeat() {
+        let mut parser = Assembler::new();
+        let mut asm = |line| parser.accept_line(line).unwrap();
+
+        asm(".architecture a1");
+        asm("mnem test x y $a:int z w -> $a[7:6]R $a[7:6] $a[7:6]R $a[7:6]");
+        asm(".end a1");
+        asm("test x y 80h z w");
+        asm("test x y 80h z w");
+
+        assert_eq!(parser.program[0], 0b10101010);
+        assert_eq!(parser.program[1], 0b01100110);
+    }
+
+    #[test]
     fn include_architecture_works() {
         let mut parser = Assembler::new();
 
@@ -1431,5 +1541,30 @@ mod tests {
 
         assert_eq!(parser.program[0], 0b1000_0000);
         assert_eq!(parser.program.len(), 1);
+    }
+
+    #[test]
+    fn relative_label_is_relative() {
+        let mut p = Assembler::new();
+        let mut asm = |s| p.accept_line(s);
+
+        asm(".architecture a").unwrap();
+        asm("mnem nop -> 0000 0000").unwrap();
+        asm("mnem rjmp $dst:label -> 1000 $dst[3:0] R $dst[7:0]").unwrap();
+        asm(".end a").unwrap();
+
+        asm("zero: nop").unwrap();
+        asm("nop").unwrap();
+        asm("nop").unwrap();
+        asm("nop").unwrap();
+        asm("four: nop").unwrap();
+        asm("rjmp zero").unwrap();
+        asm("rjmp four").unwrap();
+
+        let jmp1 = ((p.program[5] as u32) << 8) | p.program[6] as u32;
+        let jmp2 = ((p.program[7] as u32) << 8) | p.program[8] as u32;
+
+        assert_eq!(jmp1, 0b1000_1011__0000_0000);
+        assert_eq!(jmp2, 0b1000_1101__0000_0100);
     }
 }
