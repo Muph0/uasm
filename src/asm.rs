@@ -1,12 +1,11 @@
 use bitvec::prelude::*;
-use log::*;
 use std::collections::HashMap;
 use std::fmt::{Display, Write};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Error, Write as OtherWrite};
 use std::num::ParseIntError;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{self, Path, PathBuf};
 use std::string::ParseError;
 use std::{default, fs};
 
@@ -41,6 +40,7 @@ const TOK_LIMIT_CLOSE: &str = ")";
 const SYMBOL_INT: SymbolTypeId = SymbolTypeId(0);
 const SYMBOL_LABEL: SymbolTypeId = SymbolTypeId(1);
 
+#[derive(Debug)]
 struct Arch {
     name: String,
     symbol_table: Vec<SymbolType>,
@@ -112,6 +112,7 @@ impl SymbolType {
         self.variants.get(token)
     }
 }
+#[derive(Debug)]
 struct Instr {
     mnemonic: String,
     params: Vec<Param>,
@@ -169,6 +170,7 @@ enum Encode {
 }
 
 /// An unresolved label to be resolved later
+#[derive(Debug)]
 struct LabelRequest {
     /// Where to write
     offset_bits: usize,
@@ -183,6 +185,7 @@ enum ParsedParam {
     UnresolvedLabel { label: String },
 }
 
+#[derive(Debug)]
 pub struct Assembler {
     architectures: Vec<Arch>,
     current_arch: usize,
@@ -197,21 +200,25 @@ pub struct Assembler {
 }
 impl Assembler {
     pub fn new() -> Self {
-        Self {
+        let s = Self {
             architectures: Vec::new(),
             current_arch: usize::MAX,
             block: CodeBlock::Program,
             arch_names: Default::default(),
 
             lineno: 0,
-            file_stack: vec!["command-line".to_string()],
+            file_stack: vec![],
             program: Vec::new(),
             labels: Default::default(),
             label_requests: Default::default(),
-        }
+        };
+        log::trace!("Created {s:?}");
+        s
     }
+    #[must_use]
     pub fn parse<'a>(&'a mut self, filename: &str) -> Result<&'a [u8], Vec<LocError>> {
-        let res = self.accept_file(filename);
+        log::trace!("Assembler::parse({filename})");
+        self.accept_file(filename)?;
 
         let unmet_labels: Vec<_> = self
             .label_requests
@@ -226,8 +233,8 @@ impl Assembler {
 
         Ok(&self.program)
     }
-
-    fn accept_file(&mut self, filename: &str) -> Result<(), Vec<LocError>> {
+    #[must_use]
+    pub(crate) fn accept_file(&mut self, filename: &str) -> Result<(), Vec<LocError>> {
         let file = File::open(filename).map_err(|e| {
             let msg = format!(
                 "Can't open file \"{filename}\" in \"{}\"",
@@ -240,11 +247,18 @@ impl Assembler {
             self.errs(AsmError::from(e).wrap(msg))
         })?;
 
+        self.file_stack.push(filename.to_string());
         let reader = BufReader::new(file);
+        self.accept_lines(reader.lines())
+    }
+    #[must_use]
+    pub(crate) fn accept_lines<L>(&mut self, lines: L) -> Result<(), Vec<LocError>>
+    where
+        L: Iterator<Item = Result<String, Error>>,
+    {
         let mut errors = Vec::<LocError>::new();
         let mut lineno = 0;
-
-        for line in reader.lines() {
+        for line in lines {
             lineno += 1;
             self.lineno = lineno;
             let line_str = line.map_err(|e| self.err(e))?;
@@ -260,6 +274,7 @@ impl Assembler {
             Err(errors)
         }
     }
+    #[must_use]
     pub fn write_output(&mut self, filename: &str) -> AsmResult<()> {
         let mut file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
@@ -268,7 +283,8 @@ impl Assembler {
 
         Ok(())
     }
-    fn accept_line(&mut self, line: &str) -> Result<(), Vec<LocError>> {
+    #[must_use]
+    pub(crate) fn accept_line(&mut self, line: &str) -> Result<(), Vec<LocError>> {
         let token = read_token_peek(line);
         if token.is_empty() {
             return Ok(());
@@ -281,14 +297,20 @@ impl Assembler {
     }
 
     fn arch(&self) -> AsmResult<&Arch> {
+        log::trace!("Assembler::arch({})", self.current_arch);
         if self.current_arch < self.architectures.len() {
             Ok(&self.architectures[self.current_arch])
         } else {
-            Err("Can't encode instructions when no architecture is selected.".into())
+            Err("Can't encode instructions when no architecture is selected".into())
         }
     }
-    fn arch_mut(&mut self) -> &mut Arch {
-        &mut self.architectures[self.current_arch]
+    fn arch_mut(&mut self) -> AsmResult<&mut Arch> {
+        log::trace!("Assembler::arch_mut({})", self.current_arch);
+        if self.current_arch < self.architectures.len() {
+            Ok(&mut self.architectures[self.current_arch])
+        } else {
+            Err("Can't encode instructions when no architecture is selected".into())
+        }
     }
     fn add_arch(&mut self, arch: Arch) {
         let id = self.architectures.len();
@@ -297,8 +319,15 @@ impl Assembler {
         self.architectures.push(arch);
     }
 
+    fn current_file(&self) -> &str {
+        self.file_stack
+            .last()
+            .map(|s| s.as_str())
+            .unwrap_or("<unknown>")
+    }
+
     fn accept_program_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
-        debug!("Program line: {}", line);
+        log::debug!("Program line: {}", line);
         let mut token = read_token(&mut line);
         if token == TOK_MACRO_MARK {
             return self.accept_program_directive(line);
@@ -358,7 +387,7 @@ impl Assembler {
             .into())
     }
     fn accept_program_directive(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
-        debug!("Program directive: {}", line);
+        log::debug!("Program directive: {}", line);
 
         let options = [TOK_ARCH, TOK_USE, TOK_INCLUDE];
         let token = self
@@ -387,15 +416,25 @@ impl Assembler {
     fn accept_directive_include(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         let filename = self.read_str_lit(&mut line).map_err(|e| self.err(e))?;
 
-        warn!("Including file {filename}.");
-        self.accept_file(filename)
+        let file = Path::new(filename);
+        let mut path = PathBuf::new();
+
+        if file.is_relative() {
+            path.push(self.current_file());
+            path.push("..");
+        }
+        path.push(file);
+
+        let filename = path.to_string_lossy();
+        log::info!("Including file {filename}.");
+        self.accept_file(&filename)
     }
     fn accept_program_label(&mut self, label: &str) -> AsmResult<()> {
-        debug!("Label: {}", label);
+        log::debug!("Label: {}", label);
 
         let value = self.program.len();
 
-        let symbol = self.arch_mut().get_symbol_mut(SYMBOL_LABEL);
+        let symbol = self.arch_mut()?.get_symbol_mut(SYMBOL_LABEL);
         symbol.variants.insert(label.to_string(), value);
 
         // resolve requests under this label
@@ -406,9 +445,9 @@ impl Assembler {
                 let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
                 let offset = req.offset_bits;
                 let part = req.part;
-                trace!("{:?}", program_bits);
+                log::trace!("{:?}", program_bits);
                 program_bits[offset..offset + part.len()].store_be(value >> part.start);
-                trace!("{:?}", program_bits);
+                log::trace!("{:?}", program_bits);
             }
         }
 
@@ -444,7 +483,7 @@ impl Assembler {
         for frag in &ir.encoding {
             match frag {
                 Encode::Bits { value, size } => {
-                    debug!("Appending const {:03X}:{} to {}", value, size, code);
+                    log::debug!("Appending const {:03X}:{} to {}", value, size, code);
                     let end = code.len();
                     code.resize(end + size, false);
                     code[end..end + size].store_be(*value);
@@ -473,7 +512,7 @@ impl Assembler {
                         }
                     } - iff(*rel, self.program.len() as isize, 0);
 
-                    debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
+                    log::debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
                     code[end..end + part.len()].store_be(value >> part.start);
                 }
@@ -484,7 +523,7 @@ impl Assembler {
             self.add_label_req(req);
         }
 
-        debug!("Converted instruction: {}", code);
+        log::debug!("Converted instruction: {}", code);
         assert!(code.len() % 8 == 0);
 
         Ok(code)
@@ -546,8 +585,8 @@ impl Assembler {
                 size,
                 variants,
             };
-            debug!("symbol {:?}", symbol);
-            self.arch_mut().add_symbol(symbol);
+            log::debug!("symbol {:?}", symbol);
+            self.arch_mut()?.add_symbol(symbol);
         }
         Ok(())
     }
@@ -650,7 +689,7 @@ impl Assembler {
             encoding.push(enc);
         }
 
-        self.arch_mut().instructions.push(Instr {
+        self.arch_mut()?.instructions.push(Instr {
             mnemonic: mnem.to_string(),
             params,
             encoding,
@@ -960,19 +999,20 @@ impl Assembler {
     fn err<T: Into<AsmError>>(&self, t: T) -> LocError {
         LocError {
             error: t.into(),
-            file: self.file_stack.last().map(|s| s.clone()),
+            file: Some(self.current_file().to_string()),
             line: self.lineno,
         }
     }
     fn errs<T: Into<AsmError>>(&self, t: T) -> Vec<LocError> {
         vec![LocError {
             error: t.into(),
-            file: self.file_stack.last().map(|s| s.clone()),
+            file: Some(self.current_file().to_string()),
             line: self.lineno,
         }]
     }
 }
 
+#[derive(Debug)]
 enum CodeBlock {
     Program,
     Architecture,
@@ -1089,7 +1129,7 @@ mod tests {
         let mut parser = Assembler::new();
 
         parser.add_arch(Arch::new("test"));
-        parser.arch_mut().add_symbol(SymbolType {
+        parser.arch_mut().unwrap().add_symbol(SymbolType {
             name: "reg".to_string(),
             size: Some(5),
             variants: {
@@ -1550,7 +1590,7 @@ mod tests {
 
         asm(".architecture a").unwrap();
         asm("mnem nop -> 0000 0000").unwrap();
-        asm("mnem rjmp $dst:label -> 1000 $dst[3:0] R $dst[7:0]").unwrap();
+        asm("mnem rjmp $dst:label -> 1000 $dst[3:0]R $dst[7:0]").unwrap();
         asm(".end a").unwrap();
 
         asm("zero: nop").unwrap();

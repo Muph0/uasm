@@ -5,6 +5,9 @@ mod cli;
 mod error;
 mod expr;
 
+#[cfg(test)]
+pub mod asm_tests_red;
+
 use std::{env, path::Path, fs::File, io::{BufWriter, Write}, fmt::Display};
 
 use asm::{Assembler};
@@ -16,6 +19,8 @@ fn print_error<T: Display>(msg: T) {
 }
 
 fn main() {
+    env_logger::init();
+    log::debug!("Logger initialized.");
     let args = CliArgs::new();
 
     match run(args) {
@@ -32,6 +37,7 @@ fn run(args: CliArgs) -> Result<(), AsmError> {
 
     match asm.parse(&args.input) {
         Err(errors) => {
+            log::trace!("Parsing finished with errors");
 
             for err in &errors {
                 print_error(err);
@@ -40,6 +46,7 @@ fn run(args: CliArgs) -> Result<(), AsmError> {
             return Err("Parsing failed".into());
         }
         Ok(program) => {
+            log::info!("Parsing finished OK.");
             let outfile: String = args.output.as_ref().map(|s| s.clone()).unwrap_or_else(|| {
                 Path::new(&args.input)
                     .with_extension("bin")
