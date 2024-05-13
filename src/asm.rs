@@ -165,7 +165,7 @@ enum Encode {
     Param {
         id: usize,
         part: Range<usize>,
-        rel: bool,
+        relative: bool,
     },
 }
 
@@ -176,7 +176,10 @@ struct LabelRequest {
     offset_bits: usize,
     /// Which part of the label to write here.
     part: Range<usize>,
+    /// What is the label name
     label: String,
+    /// Add this to the label value (for relative branching)
+    relative: isize,
 }
 
 #[derive(Debug, Clone)]
@@ -365,7 +368,7 @@ impl Assembler {
                 }
                 return Ok(());
             } else {
-                return Err(self.errs("Unknown mnemonic \"{token}\"."));
+                return Err(self.errs(format!("Unknown mnemonic \"{token}\".")));
             }
         }
 
@@ -426,7 +429,7 @@ impl Assembler {
         path.push(file);
 
         let filename = path.to_string_lossy();
-        log::info!("Including file {filename}.");
+        log::debug!("Including file {filename}.");
         self.accept_file(&filename)
     }
     fn accept_program_label(&mut self, label: &str) -> AsmResult<()> {
@@ -441,13 +444,12 @@ impl Assembler {
         let requests = self.label_requests.remove(label);
         if let Some(requests) = requests {
             for req in requests {
-                // rewrite
+                log::trace!("Rewriting code by {:?}", req);
                 let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
                 let offset = req.offset_bits;
                 let part = req.part;
-                log::trace!("{:?}", program_bits);
-                program_bits[offset..offset + part.len()].store_be(value >> part.start);
-                log::trace!("{:?}", program_bits);
+                program_bits[offset..offset + part.len()]
+                    .store_be((value as isize + req.relative) >> part.start);
             }
         }
 
@@ -488,7 +490,7 @@ impl Assembler {
                     code.resize(end + size, false);
                     code[end..end + size].store_be(*value);
                 }
-                Encode::Param { id, part, rel } => {
+                Encode::Param { id, part, relative } => {
                     if *id >= parsed_params.len() {
                         return Err(format!(
                             "A parameter #{id} expected, but only parsed total of {}",
@@ -500,6 +502,8 @@ impl Assembler {
                     let parsed = parsed_params[*id].clone();
                     let end = code.len();
 
+                    let relative_offset = iff(*relative, self.program.len() as isize, 0);
+
                     let mut value = match parsed {
                         ParsedParam::Value(value) => value,
                         ParsedParam::UnresolvedLabel { label } => {
@@ -507,10 +511,11 @@ impl Assembler {
                                 offset_bits: self.program.len() * 8 + end,
                                 part: part.clone(),
                                 label,
+                                relative: -relative_offset,
                             });
                             -1
                         }
-                    } - iff(*rel, self.program.len() as isize, 0);
+                    } - relative_offset;
 
                     log::debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
@@ -675,7 +680,7 @@ impl Assembler {
                     Encode::Param {
                         id: param_id,
                         part,
-                        rel,
+                        relative: rel,
                     }
                 }
                 _ => {
@@ -1372,7 +1377,7 @@ mod tests {
             Encode::Param {
                 id: 0,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
         assert_eq!(
@@ -1380,7 +1385,7 @@ mod tests {
             Encode::Param {
                 id: 1,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
         assert_eq!(
@@ -1388,7 +1393,7 @@ mod tests {
             Encode::Param {
                 id: 2,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
         assert_eq!(
@@ -1396,7 +1401,7 @@ mod tests {
             Encode::Param {
                 id: 3,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
         assert_eq!(
@@ -1404,7 +1409,7 @@ mod tests {
             Encode::Param {
                 id: 4,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
     }
@@ -1425,7 +1430,7 @@ mod tests {
             Encode::Param {
                 id: 0,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
         assert_eq!(ir.encoding[2], Encode::Bits { value: 1, size: 1 });
@@ -1434,7 +1439,7 @@ mod tests {
             Encode::Param {
                 id: 1,
                 part: 0..2,
-                rel: false
+                relative: false
             }
         );
     }
@@ -1586,25 +1591,71 @@ mod tests {
     #[test]
     fn relative_label_is_relative() {
         let mut p = Assembler::new();
-        let mut asm = |s| p.accept_line(s);
 
-        asm(".architecture a").unwrap();
-        asm("mnem nop -> 0000 0000").unwrap();
-        asm("mnem rjmp $dst:label -> 1000 $dst[3:0]R $dst[7:0]").unwrap();
-        asm(".end a").unwrap();
+        p.accept_line(".architecture a").unwrap();
+        p.accept_line("mnem nop -> 0000 0000").unwrap();
+        p.accept_line("mnem rjmp $dst:label -> 1000 $dst[3:0]R $dst[7:0]")
+            .unwrap();
+        p.accept_line(".end a").unwrap();
 
-        asm("zero: nop").unwrap();
-        asm("nop").unwrap();
-        asm("nop").unwrap();
-        asm("nop").unwrap();
-        asm("four: nop").unwrap();
-        asm("rjmp zero").unwrap();
-        asm("rjmp four").unwrap();
+        {
+            let (rjmp, _) = p.arch().unwrap().get_instr_by_name("rjmp").unwrap();
+            match &rjmp.encoding[1] {
+                Encode::Bits { .. } => assert!(false, "Should be a param"),
+                Encode::Param {
+                    id,
+                    part,
+                    relative: rel,
+                } => assert_eq!(*rel, true),
+            }
+        }
+
+        p.accept_line("zero: nop").unwrap();
+        p.accept_line("nop").unwrap();
+        p.accept_line("nop").unwrap();
+        p.accept_line("nop").unwrap();
+        p.accept_line("four: nop").unwrap();
+        p.accept_line("rjmp zero").unwrap();
+        p.accept_line("rjmp four").unwrap();
 
         let jmp1 = ((p.program[5] as u32) << 8) | p.program[6] as u32;
         let jmp2 = ((p.program[7] as u32) << 8) | p.program[8] as u32;
 
         assert_eq!(jmp1, 0b1000_1011__0000_0000);
         assert_eq!(jmp2, 0b1000_1101__0000_0100);
+    }
+
+    #[test]
+    fn relative_fw_label_is_relative() {
+        let mut p = Assembler::new();
+
+        p.accept_line(".architecture a").unwrap();
+        p.accept_line("mnem nop -> 0000 0000").unwrap();
+        p.accept_line("mnem jmp $dst:label -> $dst[7:0] $dst[7:0]R")
+            .unwrap();
+        p.accept_line(".end a").unwrap();
+
+        p.accept_lines(
+            "
+            nop
+            nop
+            nop
+            nop
+            jmp end
+            nop
+            nop
+            nop
+            nop
+            end:
+            nop
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        let jmp1 = ((p.program[4] as u32) << 8) | p.program[5] as u32;
+
+        assert_eq!(jmp1, 0b0000_1010__0000_0110);
     }
 }
