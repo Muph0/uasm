@@ -22,6 +22,7 @@ const TOK_USE: &str = "use";
 const TOK_END: &str = "end";
 const TOK_INCLUDE: &str = "include";
 const TOK_BYTES: &str = "db";
+const TOK_WORDS: &str = "dw";
 const TOK_MNEM: &str = "mnem";
 const TOK_SYMBOL: &str = "symbol";
 const TOK_RELATIVE: &str = "R";
@@ -45,9 +46,10 @@ struct Arch {
     name: String,
     symbol_table: Vec<SymbolType>,
     instructions: Vec<Instr>,
+    big_endian: bool,
 }
 impl Arch {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, big_endian: bool) -> Self {
         Self {
             name: name.to_string(),
             symbol_table: vec![
@@ -63,6 +65,7 @@ impl Arch {
                 },
             ],
             instructions: Vec::new(),
+            big_endian,
         }
     }
     fn add_symbol(&mut self, symbol: SymbolType) {
@@ -299,6 +302,14 @@ impl Assembler {
         }
     }
 
+    fn get_program_word(&self, i: usize, big_endian: bool) -> u16 {
+        if (big_endian) {
+            (self.program[i] as u16) << 8 | self.program[i + 1] as u16
+        } else {
+            (self.program[i + 1] as u16) << 8 | self.program[i] as u16
+        }
+    }
+
     fn arch(&self) -> AsmResult<&Arch> {
         log::trace!("Assembler::arch({})", self.current_arch);
         if self.current_arch < self.architectures.len() {
@@ -392,7 +403,7 @@ impl Assembler {
     fn accept_program_directive(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program directive: {}", line);
 
-        let options = [TOK_ARCH, TOK_USE, TOK_INCLUDE];
+        let options = [TOK_ARCH, TOK_USE, TOK_INCLUDE, TOK_BYTES, TOK_WORDS];
         let token = self
             .read_one_of(&options, &mut line)
             .map_err(|e| self.err(e.wrap_str("Unknown macro")))?;
@@ -402,6 +413,8 @@ impl Assembler {
             default => match token {
                 0 => self.start_architecture_block(line),
                 1 => self.accept_directive_use(line),
+                3 => self.accept_directive_static_data(line, 1),
+                4 => self.accept_directive_static_data(line, 2),
                 default => Err("Handler for this macro not implemented".into()),
             }
             .map_err(|e| self.errs(e)),
@@ -431,6 +444,9 @@ impl Assembler {
         let filename = path.to_string_lossy();
         log::debug!("Including file {filename}.");
         self.accept_file(&filename)
+    }
+    fn accept_directive_static_data(&mut self, mut line: &str, element_size: i32) -> AsmResult<()> {
+        todo!()
     }
     fn accept_program_label(&mut self, label: &str) -> AsmResult<()> {
         log::debug!("Label: {}", label);
@@ -538,7 +554,8 @@ impl Assembler {
         self.block = CodeBlock::Architecture;
         self.current_arch = self.architectures.len();
         let name = self.read_identifier(&mut line)?;
-        self.architectures.push(Arch::new(name));
+        let endianess = self.read_one_of(&["BE" , "LE"], &mut line)?;
+        self.architectures.push(Arch::new(name, endianess == 0));
         Ok(())
     }
     fn accept_arch_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
@@ -1133,7 +1150,7 @@ mod tests {
     fn setup_parser_empty() -> Assembler {
         let mut parser = Assembler::new();
 
-        parser.add_arch(Arch::new("test"));
+        parser.add_arch(Arch::new("test", false));
         parser.arch_mut().unwrap().add_symbol(SymbolType {
             name: "reg".to_string(),
             size: Some(5),
@@ -1152,7 +1169,7 @@ mod tests {
         let mut parser = Assembler::new();
         let mut asm = |line| parser.accept_line(line).unwrap();
 
-        asm(".architecture a1");
+        asm(".architecture a1 LE");
         asm("symbol reg[2] = r0 | r1 | r2 | r3");
         asm("mnem mov $rd:reg, $rs:reg -> 010 $rd 1 $rs");
         asm("mnem nop -> 0000 0000");
@@ -1164,7 +1181,7 @@ mod tests {
         let mut parser = Assembler::new();
         let mut asm = |line| parser.accept_line(line).unwrap();
 
-        asm(".architecture simple1");
+        asm(".architecture simple1 LE");
         asm("symbol reg[2] = r0 | r1 | r2 | r3");
         asm("mnem mov $src:reg, $dst:reg -> 0000 $src $dst");
         asm("mnem add $src:reg, $dst:reg -> 0010 $src $dst");
@@ -1281,7 +1298,7 @@ mod tests {
         let mut parser = Assembler::new();
 
         let lines = vec![
-            ".architecture a1",
+            ".architecture a1 LE",
             "symbol reg[2] = r0:0 | r1 | r2 | r3",
             "symbol test = r0 | r1 | hello:10 | world",
             ".end a1",
@@ -1309,7 +1326,7 @@ mod tests {
         let mut asm = |line| p.accept_line(line).unwrap();
         let mut s = |text| String::from(text);
 
-        asm(".architecture a1");
+        asm(".architecture a1 LE");
         asm("symbol reg[2] = r0 | r1 | r2 | r3");
         asm("mnem sum $r0:reg, $r1:reg, $r2:reg, $r3:reg, $r4:reg -> 100100 $r0 $r1 $r2 $r3 $r4");
         asm(".end a1");
@@ -1537,7 +1554,7 @@ mod tests {
         let mut parser = Assembler::new();
         let mut asm = |line| parser.accept_line(line).unwrap();
 
-        asm(".architecture a1");
+        asm(".architecture a1 LE");
         asm("mnem test $a:int -> $a[7:4] 0000");
         asm(".end a1");
         asm("test A0h");
@@ -1550,7 +1567,7 @@ mod tests {
         let mut parser = Assembler::new();
         let mut asm = |line| parser.accept_line(line).unwrap();
 
-        asm(".architecture a1");
+        asm(".architecture a1 LE");
         asm("mnem test x y $a:int z w -> $a[7:6] $a[7:6] $a[7:6] $a[7:6]");
         asm(".end a1");
         asm("test x y 80h z w");
@@ -1563,7 +1580,7 @@ mod tests {
         let mut parser = Assembler::new();
         let mut asm = |line| parser.accept_line(line).unwrap();
 
-        asm(".architecture a1");
+        asm(".architecture a1 LE");
         asm("mnem test x y $a:int z w -> $a[7:6]R $a[7:6] $a[7:6]R $a[7:6]");
         asm(".end a1");
         asm("test x y 80h z w");
@@ -1592,7 +1609,7 @@ mod tests {
     fn relative_label_is_relative() {
         let mut p = Assembler::new();
 
-        p.accept_line(".architecture a").unwrap();
+        p.accept_line(".architecture a LE").unwrap();
         p.accept_line("mnem nop -> 0000 0000").unwrap();
         p.accept_line("mnem rjmp $dst:label -> 1000 $dst[3:0]R $dst[7:0]")
             .unwrap();
@@ -1629,7 +1646,7 @@ mod tests {
     fn relative_fw_label_is_relative() {
         let mut p = Assembler::new();
 
-        p.accept_line(".architecture a").unwrap();
+        p.accept_line(".architecture a LE").unwrap();
         p.accept_line("mnem nop -> 0000 0000").unwrap();
         p.accept_line("mnem jmp $dst:label -> $dst[7:0] $dst[7:0]R")
             .unwrap();
@@ -1657,5 +1674,28 @@ mod tests {
         let jmp1 = ((p.program[4] as u32) << 8) | p.program[5] as u32;
 
         assert_eq!(jmp1, 0b0000_1010__0000_0110);
+    }
+
+    #[test]
+    fn static_memory_is_translated_corrrectly() {
+        let mut p = Assembler::new();
+
+        p.accept_lines(
+            "
+            .db 1, 2, 3, Ah
+            .dw FFFFh, 12345
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(p.program[0], 1);
+        assert_eq!(p.program[1], 2);
+        assert_eq!(p.program[2], 3);
+        assert_eq!(p.program[3], 10);
+
+        assert_eq!(p.get_program_word(4, true), 0xFFFF);
+        assert_eq!(p.get_program_word(6, true), 12345);
     }
 }

@@ -1,5 +1,5 @@
 
-.architecture test1
+.architecture test1 LE
 
 mnem nop -> 1000 0000
 

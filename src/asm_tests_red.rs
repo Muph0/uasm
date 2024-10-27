@@ -8,3 +8,13 @@ fn nonexistent_include_is_reported() {
 
     assert!(r.is_err());
 }
+
+
+#[test]
+fn nonexistent_macro_is_error() {
+    let mut parser = Assembler::new();
+
+    let r = parser.accept_line(".banan lopata");
+
+    assert!(r.is_err());
+}
