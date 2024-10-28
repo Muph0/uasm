@@ -340,6 +340,7 @@ impl Assembler {
             .unwrap_or("<unknown>")
     }
 
+    #[must_use]
     fn accept_program_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program line: {}", line);
         let mut token = read_token(&mut line);
@@ -400,6 +401,7 @@ impl Assembler {
             ))
             .into())
     }
+    #[must_use]
     fn accept_program_directive(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program directive: {}", line);
 
@@ -420,6 +422,7 @@ impl Assembler {
             .map_err(|e| self.errs(e)),
         }
     }
+    #[must_use]
     fn accept_directive_use(&mut self, mut line: &str) -> AsmResult<()> {
         let token = self.read_identifier(&mut line)?;
         if let Some(arch) = self.arch_names.get(token) {
@@ -429,6 +432,7 @@ impl Assembler {
         }
         self.read_eol(&mut line)
     }
+    #[must_use]
     fn accept_directive_include(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         let filename = self.read_str_lit(&mut line).map_err(|e| self.err(e))?;
 
@@ -445,8 +449,47 @@ impl Assembler {
         log::debug!("Including file {filename}.");
         self.accept_file(&filename)
     }
-    fn accept_directive_static_data(&mut self, mut line: &str, element_size: i32) -> AsmResult<()> {
-        todo!()
+    #[must_use]
+    fn accept_directive_static_data(
+        &mut self,
+        mut line: &str,
+        element_size: usize,
+    ) -> AsmResult<()> {
+        loop {
+            if let Ok(number) = self.read_number_literal(&mut line) {
+                self.encode_int(number, element_size)?;
+            } else if let Ok(string) = self.read_str_lit(&mut line) {
+                for b in string.bytes() {
+                    self.encode_int(b.into(), element_size)?;
+                }
+            } else {
+                return Err("Expected number or string literal.".into());
+            }
+
+            if let Ok(_) = self.read_eol(&mut line) {
+                return Ok(());
+            }
+
+            let comma = self.read_exact(",", &mut line)?;
+        }
+    }
+    #[must_use]
+    fn encode_int(&mut self, value: isize, size: usize) -> AsmResult<()> {
+        let mut code = BitVec::<u8, Msb0>::new();
+        code.resize(8 * size, false);
+        let slice = &mut code[0..8 * size];
+        match self.arch()?.big_endian {
+            true => slice.store_be(value),
+            false => slice.store_le(value),
+        }
+
+        // convert to bytes
+        let bytes = code.len() / 8;
+        for i in 0..bytes {
+            let byte: u8 = code[0 + i * 8..8 + i * 8].load();
+            self.program.push(byte);
+        }
+        Ok(())
     }
     fn accept_program_label(&mut self, label: &str) -> AsmResult<()> {
         log::debug!("Label: {}", label);
@@ -554,7 +597,7 @@ impl Assembler {
         self.block = CodeBlock::Architecture;
         self.current_arch = self.architectures.len();
         let name = self.read_identifier(&mut line)?;
-        let endianess = self.read_one_of(&["BE" , "LE"], &mut line)?;
+        let endianess = self.read_one_of(&["BE", "LE"], &mut line)?;
         self.architectures.push(Arch::new(name, endianess == 0));
         Ok(())
     }
@@ -1677,11 +1720,18 @@ mod tests {
     }
 
     #[test]
-    fn static_memory_is_translated_corrrectly() {
+    fn static_memory_numbers() {
         let mut p = Assembler::new();
 
         p.accept_lines(
             "
+            .architecture a1 BE
+            .end a1
+            .db 1, 2, 3, Ah
+            .dw FFFFh, 12345
+
+            .architecture a2 LE
+            .end a2
             .db 1, 2, 3, Ah
             .dw FFFFh, 12345
         "
@@ -1690,12 +1740,49 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(p.program[0], 1);
-        assert_eq!(p.program[1], 2);
-        assert_eq!(p.program[2], 3);
-        assert_eq!(p.program[3], 10);
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                // big-endian
+                1, 2, 3, 10, //
+                255, 255, 0x30, 0x39, //
+                // little-endian
+                1, 2, 3, 10, //
+                255, 255, 0x39, 0x30, //
+            ]
+        );
+    }
 
-        assert_eq!(p.get_program_word(4, true), 0xFFFF);
-        assert_eq!(p.get_program_word(6, true), 12345);
+    #[test]
+    fn static_memory_strings() {
+        let mut p = Assembler::new();
+
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            .end a1
+            .db \"Hello, world\", 0
+            .dw \"ABC\", 0
+
+
+            .architecture a2 LE
+            .end a2
+            .dw \"ABC\", 0
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                72, 101, 108, 108, 111, 44, 32, // Hello,_
+                119, 111, 114, 108, 100, 0, // world\0
+                0, 65, 0, 66, 0, 67, 0, 0, // ABC\0
+                // little-endian
+                65, 0, 66, 0, 67, 0, 0, 0, // ABC\0
+            ]
+        );
     }
 }
