@@ -25,6 +25,7 @@ const TOK_BYTES: &str = "db";
 const TOK_WORDS: &str = "dw";
 const TOK_MNEM: &str = "mnem";
 const TOK_SYMBOL: &str = "symbol";
+const TOK_ALIGN: &str = "align";
 const TOK_RELATIVE: &str = "R";
 const TOK_LABEL_MARK: &str = ":";
 const TOK_RANGE_SEP: &str = ":";
@@ -47,6 +48,7 @@ struct Arch {
     symbol_table: Vec<SymbolType>,
     instructions: Vec<Instr>,
     big_endian: bool,
+    code_align: usize,
 }
 impl Arch {
     fn new(name: &str, big_endian: bool) -> Self {
@@ -66,6 +68,7 @@ impl Arch {
             ],
             instructions: Vec::new(),
             big_endian,
+            code_align: 1,
         }
     }
     fn add_symbol(&mut self, symbol: SymbolType) {
@@ -346,14 +349,14 @@ impl Assembler {
     fn accept_program_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program line: {}", line);
         let mut token = read_token(&mut line);
-        if token == TOK_MACRO_MARK {
-            return self.accept_program_directive(line);
-        }
 
+        // try parsing label
         if is_identifier(token) {
             let next = read_token_peek(&line);
             if next == TOK_LABEL_MARK {
-                self.read_exact(TOK_LABEL_MARK, &mut line);
+                self.emit_padding();
+                self.read_exact(TOK_LABEL_MARK, &mut line)
+                    .map_err(|e| self.err(e))?;
                 self.accept_program_label(token).map_err(|e| self.err(e))?;
                 token = read_token(&mut line);
 
@@ -363,16 +366,21 @@ impl Assembler {
             }
         }
 
+        // macro can be labeled
+        if token == TOK_MACRO_MARK {
+            return self.accept_program_directive(line);
+        }
+
         if is_identifier(token) {
-            let ir = self
-                .arch()
-                .map_err(|e| self.err(e))?
-                .get_instr_by_name(token);
+            let arch = self.arch().map_err(|e| self.err(e))?;
+            let ir = arch.get_instr_by_name(token);
             // TODO: repeat until match
             if let Some((_, ir)) = ir {
                 let code = self
                     .accept_program_instr(ir, line)
                     .map_err(|e| self.err(e))?;
+
+                self.emit_padding();
 
                 // convert to bytes
                 let bytes = code.len() / 8;
@@ -430,7 +438,11 @@ impl Assembler {
         if let Some(arch) = self.arch_names.get(token) {
             self.current_arch = arch.0;
         } else {
-            return Err(format!("Unknown architecture \"{token}\", available {:?}.", self.arch_names.keys()).into());
+            return Err(format!(
+                "Unknown architecture \"{token}\", available {:?}.",
+                self.arch_names.keys()
+            )
+            .into());
         }
         self.read_eol(&mut line)
     }
@@ -605,13 +617,17 @@ impl Assembler {
     }
     fn accept_arch_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         let token = self
-            .read_one_of(&[TOK_SYMBOL, TOK_MNEM, TOK_MACRO_MARK], &mut line)
+            .read_one_of(
+                &[TOK_SYMBOL, TOK_MNEM, TOK_MACRO_MARK, TOK_ALIGN],
+                &mut line,
+            )
             .map_err(|e| self.err(e))?;
 
         match token {
             0 => self.accept_symbol_line(line),
             1 => self.accept_mnem_line(line),
             2 => self.accept_arch_directive(line),
+            3 => self.accept_arch_alignment(line),
             _ => todo!("Command branch not implemented"),
         }
         .map_err(|e| vec![self.err(e)])
@@ -769,6 +785,11 @@ impl Assembler {
         self.read_eol(my_line)?;
 
         self.block = CodeBlock::Program;
+        Ok(())
+    }
+    fn accept_arch_alignment(&mut self, mut my_line: &str) -> AsmResult<()> {
+        let alignment = self.read_number_literal(&mut my_line)?;
+        self.arch_mut()?.code_align = alignment as _;
         Ok(())
     }
 
@@ -1076,6 +1097,12 @@ impl Assembler {
             file: Some(self.current_file().to_string()),
             line: self.lineno,
         }]
+    }
+
+    fn emit_padding(&mut self) {
+        while self.program.len() % self.arch().unwrap().code_align != 0 {
+            self.program.push(0);
+        }
     }
 }
 
@@ -1791,7 +1818,6 @@ mod tests {
     #[test]
     fn use_works() {
         let mut p = Assembler::new();
-
         p.accept_lines(
             "
             .architecture a1 BE
@@ -1803,5 +1829,70 @@ mod tests {
             .map(|s| Ok(s.to_string())),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn jump_over_db() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            mnem nop -> 0001 1000
+            mnem jmp $l:label -> 1 $l[6:0]
+            .end a1
+
+            jmp start
+
+            .db \"Hello\", 0
+
+            start: nop
+            nop
+            nop
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                0x87, b'H', b'e', b'l', b'l', b'o', 0, // jmp start Hello,_
+                0x18, 0x18, 0x18, // 3x nop
+            ]
+        );
+    }
+
+    #[test]
+    fn jump_over_db_align_2() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            align 2
+            mnem nop -> 0001 1000 0010 1001
+            mnem jmp $l:label -> 1111 0000 $l[7:0]
+            .end a1
+
+            jmp start
+
+            .db \"Helo\", 0
+
+            start: nop
+            nop
+            nop
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                0xf0, 8, b'H', b'e', b'l', b'o', 0, 0, // 2x zero
+                0x18, 0x29, 0x18, 0x29, 0x18, 0x29, // 3x nop
+            ]
+        );
     }
 }
