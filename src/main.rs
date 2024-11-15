@@ -5,6 +5,9 @@ mod cli;
 mod error;
 mod expr;
 
+//mod parser;
+//lalrpop_mod!(pub grammar);
+
 #[cfg(test)]
 pub mod asm_tests_red;
 
@@ -13,6 +16,7 @@ use std::{env, path::Path, fs::File, io::{BufWriter, Write}, fmt::Display};
 use asm::{Assembler};
 use cli::CliArgs;
 use error::AsmError;
+use lalrpop_util::lalrpop_mod;
 
 fn print_error<T: Display>(msg: T) {
     println!("\x1B[1;31merror:\x1B[0m {}", msg);

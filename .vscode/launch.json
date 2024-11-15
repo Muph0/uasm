@@ -10,7 +10,8 @@
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/uasm.exe",
             "args": [
-                "C:/Users/kytka/source/recreation/CPUs/omega/program.u"
+                "C:/Users/kytka/source/learning/minic-rs/test-data/asm/ios.s"
+                //"C:/Users/kytka/source/recreation/CPUs/omega/program.u"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

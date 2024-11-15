@@ -255,7 +255,9 @@ impl Assembler {
 
         self.file_stack.push(filename.to_string());
         let reader = BufReader::new(file);
-        self.accept_lines(reader.lines())
+        self.accept_lines(reader.lines())?;
+        self.file_stack.pop();
+        Ok(())
     }
     #[must_use]
     pub(crate) fn accept_lines<L>(&mut self, lines: L) -> Result<(), Vec<LocError>>
@@ -428,7 +430,7 @@ impl Assembler {
         if let Some(arch) = self.arch_names.get(token) {
             self.current_arch = arch.0;
         } else {
-            return Err(format!("Unknown architecture \"{token}\".").into());
+            return Err(format!("Unknown architecture \"{token}\", available {:?}.", self.arch_names.keys()).into());
         }
         self.read_eol(&mut line)
     }
@@ -598,7 +600,7 @@ impl Assembler {
         self.current_arch = self.architectures.len();
         let name = self.read_identifier(&mut line)?;
         let endianess = self.read_one_of(&["BE", "LE"], &mut line)?;
-        self.architectures.push(Arch::new(name, endianess == 0));
+        self.add_arch(Arch::new(name, endianess == 0));
         Ok(())
     }
     fn accept_arch_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
@@ -1784,5 +1786,22 @@ mod tests {
                 65, 0, 66, 0, 67, 0, 0, 0, // ABC\0
             ]
         );
+    }
+
+    #[test]
+    fn use_works() {
+        let mut p = Assembler::new();
+
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            .end a1
+
+            .use a1
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
     }
 }

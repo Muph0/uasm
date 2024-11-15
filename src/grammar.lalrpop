@@ -1,0 +1,85 @@
+use std::str::FromStr;
+use crate::parser::*;
+
+grammar<'a>(p: &mut ParserState<'a>);
+
+match {
+    "\n",
+    "=", "->",
+    "|",
+    "+",
+    "-",
+    "*",
+    "/",
+    "(", ")",
+    "[", "]",
+    ":", "$",
+    ".", ",", ";",
+    "architecture", "symbol", "end", "mnem", "def", "BE", "LE",
+
+    r"[0-9]+",
+    r"[A-Za-z_][A-Za-z0-9_]*",
+
+    // Skip whitespace and comments
+    r"[ \r\t]*" => { },
+    r";[^\n\r]*[\n\r]*" => { }, // ; comment
+}
+
+pub Unit: () = {
+    Statement*,
+};
+
+Statement: () = {
+    <a:ArchBody> <l:@L> <s:ArchEnd> <r:@R> ENDL => p.add_architecture(a, s, l..r),
+    /* empty */ ENDL,
+};
+
+ArchBody: Architecture = {
+    "." "architecture" <n:NAME> <be:Endianess> ENDL
+        => Architecture { name: n.to_string(), big_endian: be, ..Default::default() },
+    <a:ArchBody> <d:SymDecl> ENDL => p.add_symbol(a, d),
+    <a:ArchBody> <m:MnemDecl> ENDL => p.add_mnemonic(a, m),
+    <ArchBody> /* empty */ ENDL,
+};
+ArchEnd: &'input str = "." "end" <n:NAME> => n;
+
+SymDecl: Symbol = "symbol" <l:@L><n:NAME><r:@R> <s:Size?> "=" <vs:Sep<"|", SymVariant>>
+    => p.create_symbol(n, p.loc(l..r), s, vs);
+SymVariant: (&'input str, Option<usize>, Loc) = <l:@L> <n:NAME> <s:(":" <NumLit>)?> <r:@R>
+    => (n, s.map(|i| i as _), p.loc(l..r));
+
+MnemDecl: Mnemonic = {
+    "mnem" <params:MnemDeclParams> "->" <encoding:MnemDeclEnc+> => Mnemonic { params, encoding }
+};
+MnemDeclParams: Vec<ParamDecl> = {
+    <n:NAME> => vec![ParamDecl::Token { value: n.to_string() }],
+    <mut v:MnemDeclParams> <n:MnemSym> => { v.push(ParamDecl::Token { value: n.to_string() }); v },
+    <mut v:MnemDeclParams> "$" <pn:NAME> ":" <sn:NAME>
+        => p.add_mnemdecl_param(v, pn, l1..r1, sn, l2..r2),
+}
+
+MnemDeclEnc: Encode = {};
+
+Endianess: bool = {
+    "BE" => true,
+    "LE" => false,
+};
+
+Size: usize = "[" <NumLit> "]" => <> as usize;
+NumLit: u64 = <r"[0-9]+"> => u64::from_str(<>).unwrap();
+Bits: &'input str = <l:@L> <s:r"[0-9]+"> <r:@R> =>? check_bit_string(s, l..r);
+
+Sep<c, T>: Vec<T> = {
+    <mut v:(<T> c)*> <e:T> => { v.push(e); v }
+};
+SepTrail<c, T>: Vec<T> = {
+    <mut v:(<T> c)+> <e:T?> => match e {
+        Some(e) => { v.push(e); v },
+        None => v,
+    }
+};
+
+MnemSym: &'input str = { <NAME>, <",">, <"[">, <"]">, <"(">, <")">, <";">, <"+">, <"-"> }
+
+ENDL: () = "\n" => ();
+NAME: &'input str = <s:r"[A-Za-z_][A-Za-z0-9_]*"> => s;
