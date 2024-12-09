@@ -23,6 +23,7 @@ const TOK_END: &str = "end";
 const TOK_INCLUDE: &str = "include";
 const TOK_BYTES: &str = "db";
 const TOK_WORDS: &str = "dw";
+const TOK_DEF: &str = "def";
 const TOK_MNEM: &str = "mnem";
 const TOK_SYMBOL: &str = "symbol";
 const TOK_ALIGN: &str = "align";
@@ -34,6 +35,7 @@ const TOK_SYMTYPE_MARK: &str = ":";
 const TOK_MINUS: &str = "-";
 const TOK_REWRITE: &str = "->";
 const TOK_PARAM_MARK: &str = "$";
+const TOK_PROGRAM_HERE: &str = "$";
 const TOK_SIZE_OPEN: &str = "[";
 const TOK_SIZE_CLOSE: &str = "]";
 const TOK_LIMIT_OPEN: &str = "(";
@@ -350,11 +352,12 @@ impl Assembler {
         log::debug!("Program line: {}", line);
         let mut token = read_token(&mut line);
 
+        self.emit_align_padding();
+
         // try parsing label
         if is_identifier(token) {
             let next = read_token_peek(&line);
             if next == TOK_LABEL_MARK {
-                self.emit_padding();
                 self.read_exact(TOK_LABEL_MARK, &mut line)
                     .map_err(|e| self.err(e))?;
                 self.accept_program_label(token).map_err(|e| self.err(e))?;
@@ -373,6 +376,8 @@ impl Assembler {
 
         if is_identifier(token) {
             let arch = self.arch().map_err(|e| self.err(e))?;
+            let big_endian = arch.big_endian;
+            let code_align = arch.code_align;
             let ir = arch.get_instr_by_name(token);
             // TODO: repeat until match
             if let Some((_, ir)) = ir {
@@ -380,7 +385,7 @@ impl Assembler {
                     .accept_program_instr(ir, line)
                     .map_err(|e| self.err(e))?;
 
-                self.emit_padding();
+                self.emit_align_padding();
 
                 // convert to bytes
                 let bytes = code.len() / 8;
@@ -415,7 +420,14 @@ impl Assembler {
     fn accept_program_directive(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program directive: {}", line);
 
-        let options = [TOK_ARCH, TOK_USE, TOK_INCLUDE, TOK_BYTES, TOK_WORDS];
+        let options = [
+            TOK_ARCH,
+            TOK_USE,
+            TOK_INCLUDE,
+            TOK_BYTES,
+            TOK_WORDS,
+            TOK_DEF,
+        ];
         let token = self
             .read_one_of(&options, &mut line)
             .map_err(|e| self.err(e.wrap_str("Unknown macro")))?;
@@ -427,6 +439,7 @@ impl Assembler {
                 1 => self.accept_directive_use(line),
                 3 => self.accept_directive_static_data(line, 1),
                 4 => self.accept_directive_static_data(line, 2),
+                5 => self.accept_directive_def(line),
                 default => Err("Handler for this macro not implemented".into()),
             }
             .map_err(|e| self.errs(e)),
@@ -488,6 +501,26 @@ impl Assembler {
         }
     }
     #[must_use]
+    fn accept_directive_def(&mut self, mut line: &str) -> AsmResult<()> {
+        let name = read_token(&mut line);
+        self.read_exact("=", &mut line)?;
+        let mut sid = SYMBOL_INT;
+        let value = match self.read_symbol_value(&mut sid, None, &mut line)? {
+            ParsedParam::Value(i) => i,
+            _ => return Err(format!("Unknown symbol {}", name).into()),
+        };
+
+        let sym = &mut *self.arch_mut()?.get_symbol_mut(sid);
+        if sym.variants.contains_key(name) {
+            return Err(format!("Symbol {}, already contains variant {}", &sym.name, name).into());
+        }
+
+        sym.variants.insert(name.to_string(), value as _);
+
+        Ok(())
+    }
+
+    #[must_use]
     fn encode_int(&mut self, value: isize, size: usize) -> AsmResult<()> {
         let mut code = BitVec::<u8, Msb0>::new();
         code.resize(8 * size, false);
@@ -539,14 +572,15 @@ impl Assembler {
         for expect_param in &ir.params {
             match expect_param {
                 Param::Token { value } => {
-                    self.read_exact(value.as_str(), &mut line);
+                    self.read_exact(value.as_str(), &mut line)?;
                 }
                 Param::Symbol {
                     name,
                     symbol_id,
                     limit,
                 } => {
-                    let parsed = self.read_symbol_value(*symbol_id, limit.clone(), &mut line)?;
+                    let mut sid = *symbol_id;
+                    let parsed = self.read_symbol_value(&mut sid, limit.clone(), &mut line)?;
                     parsed_params.push(parsed);
                 }
             }
@@ -829,6 +863,7 @@ impl Assembler {
         Ok(param)
     }
 
+    #[must_use]
     fn read_exact(&self, expect: &str, parent_line: &mut &str) -> AsmResult<()> {
         let mut line = *parent_line;
         let token = read_token(&mut line);
@@ -842,6 +877,7 @@ impl Assembler {
             })
         }
     }
+    #[must_use]
     fn read_eol(&self, line: &str) -> AsmResult<()> {
         match line.trim().is_empty() {
             true => Ok(()),
@@ -851,6 +887,7 @@ impl Assembler {
             }),
         }
     }
+    #[must_use]
     fn read_identifier<'a>(&self, parent_line: &mut &'a str) -> AsmResult<&'a str> {
         let mut line = *parent_line;
         let token = read_token(&mut line);
@@ -869,6 +906,7 @@ impl Assembler {
             })
         }
     }
+    #[must_use]
     fn read_number_literal<'a>(&self, parent_line: &mut &'a str) -> AsmResult<isize> {
         let mut line = *parent_line;
         let mut token = read_token(&mut line);
@@ -898,6 +936,7 @@ impl Assembler {
                 cause: Some(Box::new(e.into())),
             })
     }
+    #[must_use]
     fn read_sized_number_literal<'a>(
         &self,
         parent_line: &mut &'a str,
@@ -910,6 +949,7 @@ impl Assembler {
         *parent_line = line;
         Ok(SizedInt { size, value })
     }
+    #[must_use]
     fn read_irange(
         &self,
         parent_line: &mut &str,
@@ -936,6 +976,7 @@ impl Assembler {
         *parent_line = line;
         Ok(range)
     }
+    #[must_use]
     fn read_urange(&self, parent_line: &mut &str, reverse: bool) -> AsmResult<Range<usize>> {
         let mut line = *parent_line;
         let range = self.read_irange(&mut line, reverse, true)?;
@@ -943,6 +984,7 @@ impl Assembler {
         *parent_line = line;
         return Ok((range.start as usize)..(range.end as usize));
     }
+    #[must_use]
     fn read_brackets<T, F>(
         &self,
         open: &str,
@@ -961,6 +1003,7 @@ impl Assembler {
         *parent_line = line;
         return Ok(result);
     }
+    #[must_use]
     fn read_brackets_opt<T, F>(
         &self,
         open: &str,
@@ -981,6 +1024,7 @@ impl Assembler {
             Ok(None)
         }
     }
+    #[must_use]
     fn read_size_opt(&self, parent_line: &mut &str) -> AsmResult<Option<usize>> {
         let mut line = *parent_line;
         match read_token(&mut line) {
@@ -999,6 +1043,7 @@ impl Assembler {
             _ => Ok(None),
         }
     }
+    #[must_use]
     fn read_one_of(&self, options: &[&str], parent_line: &mut &str) -> AsmResult<usize> {
         let mut line = *parent_line;
         let token = read_token(&mut line);
@@ -1011,9 +1056,10 @@ impl Assembler {
             None => Err(format!("Expected one of {:?}, found '{token}'", options).into()),
         }
     }
+    #[must_use]
     fn read_symbol_value(
         &self,
-        mut symbol_id: SymbolTypeId,
+        symbol_id: &mut SymbolTypeId,
         limit: Option<Range<isize>>,
         parent_line: &mut &str,
     ) -> AsmResult<ParsedParam> {
@@ -1023,24 +1069,30 @@ impl Assembler {
         if let Some((_, id)) = self.arch()?.get_symbol_by_name(token) {
             self.read_exact(token, &mut line)?;
             self.read_exact(TOK_SYMTYPE_MARK, &mut line)?;
-            symbol_id = id;
+            *symbol_id = id;
         }
 
-        if symbol_id == SYMBOL_INT {
-            return self
-                .read_number_literal(&mut line)
-                .map(|value| ParsedParam::Value(value));
-        }
-
-        token = self.read_identifier(&mut line)?;
-        let symbol = self.arch()?.get_symbol(symbol_id);
+        token = read_token(&mut line);
+        let symbol = self.arch()?.get_symbol(*symbol_id);
         let found = symbol.get_variant(token);
 
         if found.is_none() {
-            if symbol_id == SYMBOL_LABEL {
-                return Ok(ParsedParam::UnresolvedLabel {
-                    label: token.to_string(),
-                });
+            match *symbol_id {
+                SYMBOL_LABEL => {
+                    return Ok(ParsedParam::UnresolvedLabel {
+                        label: token.to_string(),
+                    });
+                }
+                SYMBOL_INT => {
+                    if token == TOK_PROGRAM_HERE {
+                        return Ok(ParsedParam::Value(self.program.len() as _));
+                    } else {
+                        let result = self.read_number_literal(&mut token)?;
+                        *parent_line = line;
+                        return Ok(ParsedParam::Value(result));
+                    }
+                }
+                _ => {}
             }
 
             return Err(format!(
@@ -1099,8 +1151,13 @@ impl Assembler {
         }]
     }
 
-    fn emit_padding(&mut self) {
-        while self.program.len() % self.arch().unwrap().code_align != 0 {
+    #[must_use]
+    fn emit_align_padding(&mut self) {
+        let Ok(alignment) = self.arch().map(|a| a.code_align) else {
+            return;
+        };
+
+        while self.program.len() % alignment != 0 {
             self.program.push(0);
         }
     }
@@ -1538,10 +1595,10 @@ mod tests {
         let mut p = setup_parser_mov();
         let mut asm = |line| p.accept_line(line).unwrap();
 
-        asm("mov r0 r1");
-        asm("mov r1 r2");
-        asm("mov r2 r3");
-        asm("mov r3 r0");
+        asm("mov r0, r1");
+        asm("mov r1, r2");
+        asm("mov r2, r3");
+        asm("mov r3, r0");
 
         assert_eq!(p.program.len(), 4);
         assert_eq!(p.program[0], 0b010_00_1_01);
@@ -1556,9 +1613,9 @@ mod tests {
         let mut asm = |line| p.accept_line(line).unwrap();
 
         asm("a: nop");
-        asm("b: mov r1 r2");
-        asm("c: mov r2 r3");
-        asm("d: mov r3 r0");
+        asm("b: mov r1, r2");
+        asm("c: mov r2, r3");
+        asm("d: mov r3, r0");
 
         assert_eq!(p.program.len(), 4);
         assert_eq!(p.program[0], 0);
@@ -1793,7 +1850,6 @@ mod tests {
             .db \"Hello, world\", 0
             .dw \"ABC\", 0
 
-
             .architecture a2 LE
             .end a2
             .dw \"ABC\", 0
@@ -1894,5 +1950,123 @@ mod tests {
                 0x18, 0x29, 0x18, 0x29, 0x18, 0x29, // 3x nop
             ]
         );
+    }
+
+    #[test]
+    fn endianess_le() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 LE
+            align 2
+            mnem nop -> 0001 1000 0010 1001
+            mnem jmp $l:label -> 1111 $l[11:0]
+            .end a1
+
+            jmp start
+
+            .db 1, 2, 3
+            .dw 1000h, 2000h, 3000h
+
+            start: nop
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                0xf0, 12, 1, 2, 3, 0, //
+                0x00, 0x10, 0x00, 0x20, 0x00, 0x30, //
+                0x18, 0x29,
+            ]
+        );
+    }
+
+    #[test]
+    fn endianess_be() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            align 2
+            mnem nop -> 0001 1000 0010 1001
+            mnem jmp $l:label -> 1111 $l[11:0]
+            .end a1
+
+            jmp start
+
+            .db 1, 2, 3
+            .dw 1000h, 2000h, 3000h
+
+            start: nop
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                0xf0, 12, 1, 2, 3, 0, //
+                0x10, 0x00, 0x20, 0x00, 0x30, 0x00, //
+                0x18, 0x29,
+            ]
+        );
+    }
+
+    #[test]
+    fn mandatory_tokens() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            symbol reg[4] = r0 | r1 | r2 | r3
+            mnem stv bp + $imm:int(0:255), $s:reg   -> 11 10 $s $imm[7:0]
+            mnem ldv $d:reg, bp + $imm:int(0:255)   -> 11 11 $d $imm[7:0]
+            .end a1
+
+            stv bp + 1, r1
+            ldv r2, bp + 2
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.program.as_slice(),
+            &[
+                0xE1, 1, //
+                0xF2, 2, //
+            ]
+        );
+    }
+
+    #[test]
+    fn dollar_equals_here() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            mnem value $d:int -> $d[7:0]
+            .end a1
+
+            .def P1 = $
+            value P1
+            .def P2 = $
+            value P2
+            .def P3 = $
+            value P3
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(p.program.as_slice(), &[0, 1, 2]);
     }
 }
