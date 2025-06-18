@@ -11,12 +11,17 @@ mod expr;
 #[cfg(test)]
 pub mod asm_tests_red;
 
-use std::{env, path::Path, fs::File, io::{BufWriter, Write}, fmt::Display};
+use std::{
+    env,
+    fmt::Display,
+    fs::File,
+    io::{BufWriter, Write},
+    path::Path,
+};
 
-use asm::{Assembler};
+use asm::Assembler;
 use cli::CliArgs;
 use error::AsmError;
-use lalrpop_util::lalrpop_mod;
 
 fn print_error<T: Display>(msg: T) {
     println!("\x1B[1;31merror:\x1B[0m {}", msg);
@@ -37,11 +42,10 @@ fn main() {
         Err(e) => {
             print_error(e);
             std::process::exit(1);
-        },
+        }
     }
 }
 fn run(args: CliArgs) -> Result<(), AsmError> {
-
     let mut asm = Assembler::new();
 
     match asm.parse(&args.input) {

@@ -1,11 +1,10 @@
 use clap::Parser;
 
 #[cfg(debug_assertions)]
-const VERSION: &str = "0.2.3 debug";
+const VERSION: &str = "0.2.4 debug";
 
 #[cfg(not(debug_assertions))]
-const VERSION: &str = "0.2.3 release";
-
+const VERSION: &str = "0.2.4 release";
 
 #[derive(Parser, Debug)]
 #[command(author, version = Some(VERSION), about, long_about = None)]

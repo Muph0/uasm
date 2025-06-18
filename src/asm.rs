@@ -770,7 +770,11 @@ impl Assembler {
 
                     let part = self
                         .read_brackets_opt(TOK_SIZE_OPEN, TOK_SIZE_CLOSE, line, |s, line| {
-                            s.read_urange(line, true)
+                            s.read_urange(line, true).or_else(|x| {
+                                s.read_number_literal(line)
+                                    .map(|bit| bit as usize)
+                                    .map(|bit| bit..bit + 1)
+                            })
                         })?
                         .or(param_size.map(|s| 0..s));
 
@@ -1207,6 +1211,9 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
                     State::Ident
                 } else if c == '"' {
                     State::String
+                } else if c == ';' {
+                    len = 0;
+                    State::Done
                 } else {
                     State::Symbol
                 }
@@ -1608,6 +1615,25 @@ mod tests {
     }
 
     #[test]
+    fn comment_ignored() {
+        let mut p = setup_parser_mov();
+        let mut asm = |line| p.accept_line(line).unwrap();
+
+        asm("mov r0, r1");
+        asm("-- this is a comment");
+        asm("mov r1, r2 ; this is also");
+        asm("mov r2, r3");
+        asm("; this is a comment");
+        asm("mov r3, r0");
+
+        assert_eq!(p.program.len(), 4);
+        assert_eq!(p.program[0], 0b010_00_1_01);
+        assert_eq!(p.program[1], 0b010_01_1_10);
+        assert_eq!(p.program[2], 0b010_10_1_11);
+        assert_eq!(p.program[3], 0b010_11_1_00);
+    }
+
+    #[test]
     fn label_before_mnemonic_parsed() {
         let mut p = setup_parser_mov();
         let mut asm = |line| p.accept_line(line).unwrap();
@@ -1697,7 +1723,7 @@ mod tests {
         let mut asm = |line| parser.accept_line(line).unwrap();
 
         asm(".architecture a1 LE");
-        asm("mnem test x y $a:int z w -> $a[7:6] $a[7:6] $a[7:6] $a[7:6]");
+        asm("mnem test x y $a:int z w -> $a[7] $a[6] $a[7:6] $a[7:6] $a[7:6]");
         asm(".end a1");
         asm("test x y 80h z w");
 
