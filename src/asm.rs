@@ -1,4 +1,5 @@
 use bitvec::prelude::*;
+use core::convert::Into;
 use std::collections::HashMap;
 use std::fmt::{Display, Write};
 use std::fs::File;
@@ -6,10 +7,13 @@ use std::io::{BufRead, BufReader, BufWriter, Error, Write as OtherWrite};
 use std::num::ParseIntError;
 use std::ops::Range;
 use std::path::{self, Path, PathBuf};
+use std::rc::Rc;
 use std::string::ParseError;
-use std::{default, fs};
+use std::{default, fs, mem};
 
 use crate::error::{AsmError, LocError};
+use crate::from_bytes::FromBytes;
+use crate::lines::lines_w_continuation;
 use crate::print_error;
 
 pub type AsmResult<T> = Result<T, AsmError>;
@@ -27,6 +31,7 @@ const TOK_DEF: &str = "def";
 const TOK_MNEM: &str = "mnem";
 const TOK_SYMBOL: &str = "symbol";
 const TOK_ALIGN: &str = "align";
+const TOK_ORG: &str = "org";
 const TOK_RELATIVE: &str = "R";
 const TOK_LABEL_MARK: &str = ":";
 const TOK_RANGE_SEP: &str = ":";
@@ -179,15 +184,14 @@ enum Encode {
 
 /// An unresolved label to be resolved later
 #[derive(Debug)]
-struct LabelRequest {
+struct ReparseRequest {
     /// Where to write
-    offset_bits: usize,
-    /// Which part of the label to write here.
-    part: Range<usize>,
-    /// What is the label name
-    label: String,
-    /// Add this to the label value (for relative branching)
-    relative: isize,
+    offset_bytes: usize,
+    /// What instruction id
+    isn: InstrId,
+    /// What to reparse
+    params_string: String,
+    lineno: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +211,7 @@ pub struct Assembler {
     file_stack: Vec<String>,
     program: Vec<u8>,
     labels: HashMap<String, usize>,
-    label_requests: HashMap<String, Vec<LabelRequest>>,
+    label_requests: HashMap<String, Vec<ReparseRequest>>,
 }
 impl Assembler {
     pub fn new() -> Self {
@@ -231,11 +235,20 @@ impl Assembler {
         log::trace!("Assembler::parse({filename})");
         self.accept_file(filename)?;
 
-        let unmet_labels: Vec<_> = self
-            .label_requests
-            .values()
-            .flat_map(|v| v.iter())
-            .map(|req| self.err(req.label.clone()))
+        let unmet_labels: Vec<_> = mem::take(&mut self.label_requests)
+            .into_iter()
+            .flat_map(|(label, reqs)| {
+                let label_rc = Rc::<str>::from(label.into_boxed_str());
+                reqs.into_iter().map(move |req| ((&label_rc).clone(), req))
+            })
+            .map(|(lb, req)| {
+                let mut e = self.err(AsmError {
+                    message: format!("Label \"{}\" was not defined.", lb),
+                    cause: None,
+                });
+                e.line = req.lineno;
+                e
+            })
             .collect();
 
         if !unmet_labels.is_empty() {
@@ -259,8 +272,7 @@ impl Assembler {
         })?;
 
         self.file_stack.push(filename.to_string());
-        let reader = BufReader::new(file);
-        self.accept_lines(reader.lines())?;
+        self.accept_lines(lines_w_continuation(file))?;
         self.file_stack.pop();
         Ok(())
     }
@@ -375,25 +387,22 @@ impl Assembler {
         }
 
         if is_identifier(token) {
-            let arch = self.arch().map_err(|e| self.err(e))?;
-            let big_endian = arch.big_endian;
-            let code_align = arch.code_align;
-            let ir = arch.get_instr_by_name(token);
+            let (big_endian, code_align, ir) = {
+                let arch = self.arch().map_err(|e| self.err(e))?;
+                (
+                    arch.big_endian,
+                    arch.code_align,
+                    arch.get_instr_by_name(token),
+                )
+            };
+
             // TODO: repeat until match
             if let Some((_, ir)) = ir {
                 let code = self
-                    .accept_program_instr(ir, line)
+                    .accept_program_instr(ir, self.program.len(), line)
                     .map_err(|e| self.err(e))?;
 
-                self.emit_align_padding();
-
-                // convert to bytes
-                let bytes = code.len() / 8;
-                for i in 0..bytes {
-                    let byte: u8 = code[0 + i * 8..8 + i * 8].load();
-                    self.program.push(byte);
-                }
-                return Ok(());
+                return self.emit_instruction(&code, None).map_err(|e| self.errs(e));
             } else {
                 return Err(self.errs(format!("Unknown mnemonic \"{token}\".")));
             }
@@ -427,6 +436,7 @@ impl Assembler {
             TOK_BYTES,
             TOK_WORDS,
             TOK_DEF,
+            TOK_ORG,
         ];
         let token = self
             .read_one_of(&options, &mut line)
@@ -440,6 +450,7 @@ impl Assembler {
                 3 => self.accept_directive_static_data(line, 1),
                 4 => self.accept_directive_static_data(line, 2),
                 5 => self.accept_directive_def(line),
+                6 => self.accept_directive_org(line),
                 default => Err("Handler for this macro not implemented".into()),
             }
             .map_err(|e| self.errs(e)),
@@ -484,10 +495,10 @@ impl Assembler {
     ) -> AsmResult<()> {
         loop {
             if let Ok(number) = self.read_number_literal(&mut line) {
-                self.encode_int(number, element_size)?;
+                self.emit_int(number, element_size)?;
             } else if let Ok(string) = self.read_str_lit(&mut line) {
                 for b in string.bytes() {
-                    self.encode_int(b.into(), element_size)?;
+                    self.emit_int(b.into(), element_size)?;
                 }
             } else {
                 return Err("Expected number or string literal.".into());
@@ -519,9 +530,22 @@ impl Assembler {
 
         Ok(())
     }
+    #[must_use]
+    fn accept_directive_org(&mut self, mut line: &str) -> AsmResult<()> {
+        let offset = self.read_number_literal(&mut line)?.abs() as usize;
+
+        if self.program.len() > offset {
+            return Err(format!("Offset {offset:x} has been already passed").into());
+        }
+        while self.program.len() < offset {
+            self.program.push(0);
+        }
+
+        Ok(())
+    }
 
     #[must_use]
-    fn encode_int(&mut self, value: isize, size: usize) -> AsmResult<()> {
+    fn emit_int(&mut self, value: isize, size: usize) -> AsmResult<()> {
         let mut code = BitVec::<u8, Msb0>::new();
         code.resize(8 * size, false);
         let slice = &mut code[0..8 * size];
@@ -538,6 +562,37 @@ impl Assembler {
         }
         Ok(())
     }
+    #[must_use]
+    fn emit_instruction(
+        &mut self,
+        code: &BitSlice<usize, Msb0>,
+        at: Option<usize>,
+    ) -> AsmResult<()> {
+        self.emit_align_padding();
+        let big_endian = self.arch()?.big_endian;
+
+        // convert to bytes
+        let bytes = code.len() / 8;
+        for i in 0..bytes {
+            let byte: u8 = match big_endian {
+                true => code[0 + i * 8..8 + i * 8].load(),
+                false => code[(bytes - i - 1) * 8..(bytes - i) * 8].load(),
+            };
+
+            if let Some(ofs) = at {
+                assert!(
+                    ofs + i < self.program.len(),
+                    "Cannot emit code past program end."
+                );
+                self.program[ofs + i] = byte;
+            } else {
+                self.program.push(byte);
+            }
+        }
+
+        return Ok(());
+    }
+
     fn accept_program_label(&mut self, label: &str) -> AsmResult<()> {
         log::debug!("Label: {}", label);
 
@@ -550,23 +605,27 @@ impl Assembler {
         let requests = self.label_requests.remove(label);
         if let Some(requests) = requests {
             for req in requests {
-                log::trace!("Rewriting code by {:?}", req);
-                let program_bits = BitSlice::<u8, Msb0>::from_slice_mut(&mut self.program);
-                let offset = req.offset_bits;
-                let part = req.part;
-                program_bits[offset..offset + part.len()]
-                    .store_be((value as isize + req.relative) >> part.start);
+                let code =
+                    self.accept_program_instr(req.isn, req.offset_bytes, &req.params_string)?;
+                self.emit_instruction(&code, Some(req.offset_bytes))?;
             }
         }
+
+        assert_eq!(
+            self.label_requests.contains_key(label),
+            false && "The label request was re-introduced".is_ascii()
+        );
 
         Ok(())
     }
     fn accept_program_instr(
         &mut self,
         ir_id: InstrId,
+        ir_address: usize,
         mut line: &str,
     ) -> AsmResult<BitVec<usize, Msb0>> {
         let mut parsed_params = Vec::<ParsedParam>::new();
+        let line_copy = line;
 
         let ir = self.arch()?.get_ir(ir_id);
         for expect_param in &ir.params {
@@ -588,7 +647,7 @@ impl Assembler {
 
         // generate binary code
         let mut code: BitVec<usize, Msb0> = BitVec::with_capacity(1);
-        let mut label_requests = Vec::new();
+        let mut label_requests = HashMap::new();
         for frag in &ir.encoding {
             match frag {
                 Encode::Bits { value, size } => {
@@ -609,20 +668,23 @@ impl Assembler {
                     let parsed = parsed_params[*id].clone();
                     let end = code.len();
 
-                    let relative_offset = iff(*relative, self.program.len() as isize, 0);
+                    let relative_to = iff(*relative, ir_address, 0) as isize;
 
                     let mut value = match parsed {
                         ParsedParam::Value(value) => value,
                         ParsedParam::UnresolvedLabel { label } => {
-                            label_requests.push(LabelRequest {
-                                offset_bits: self.program.len() * 8 + end,
-                                part: part.clone(),
+                            label_requests.insert(
                                 label,
-                                relative: -relative_offset,
-                            });
+                                ReparseRequest {
+                                    offset_bytes: self.program.len(),
+                                    isn: ir_id,
+                                    params_string: line_copy.to_string(),
+                                    lineno: self.lineno,
+                                },
+                            );
                             -1
                         }
-                    } - relative_offset;
+                    } - relative_to;
 
                     log::debug!("Appending param {:03X}:{} to {}", value, part.len(), code);
                     code.resize(end + part.len(), false);
@@ -631,8 +693,8 @@ impl Assembler {
             }
         }
 
-        for req in label_requests {
-            self.add_label_req(req);
+        for (label, req) in label_requests {
+            self.add_label_req(&label, req);
         }
 
         log::debug!("Converted instruction: {}", code);
@@ -1133,11 +1195,11 @@ impl Assembler {
         Ok(&token[1..token.len() - 1])
     }
 
-    fn add_label_req(&mut self, req: LabelRequest) {
-        if !self.label_requests.contains_key(&req.label) {
-            self.label_requests.insert(req.label.clone(), Vec::new());
+    fn add_label_req(&mut self, label: &str, req: ReparseRequest) {
+        if !self.label_requests.contains_key(label) {
+            self.label_requests.insert(label.to_string(), Vec::new());
         }
-        self.label_requests.get_mut(&req.label).unwrap().push(req);
+        self.label_requests.get_mut(label).unwrap().push(req);
     }
 
     fn err<T: Into<AsmError>>(&self, t: T) -> LocError {
@@ -1163,6 +1225,14 @@ impl Assembler {
 
         while self.program.len() % alignment != 0 {
             self.program.push(0);
+        }
+    }
+
+    #[cfg(test)]
+    fn mem_read<T: FromBytes>(&self, offset: usize) -> T {
+        match self.arch().unwrap().big_endian {
+            true => FromBytes::from_be_bytes(&self.program[offset..]),
+            false => FromBytes::from_le_bytes(&self.program[offset..]),
         }
     }
 }
@@ -1211,7 +1281,7 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
                     State::Ident
                 } else if c == '"' {
                     State::String
-                } else if c == ';' {
+                } else if c == ';' || c == '#' {
                     len = 0;
                     State::Done
                 } else {
@@ -1328,6 +1398,14 @@ mod tests {
         asm(".end simple1");
 
         parser
+    }
+
+    fn setup_logging(level: log::LevelFilter) {
+        env_logger::builder()
+            .filter_level(level)
+            .format_target(false)
+            .format_timestamp(None)
+            .init();
     }
 
     #[test]
@@ -1624,7 +1702,7 @@ mod tests {
         asm("mov r1, r2 ; this is also");
         asm("mov r2, r3");
         asm("; this is a comment");
-        asm("mov r3, r0");
+        asm("mov r3, r0 # also comment");
 
         assert_eq!(p.program.len(), 4);
         assert_eq!(p.program[0], 0b010_00_1_01);
@@ -1672,8 +1750,7 @@ mod tests {
         assert_eq!(parser.program[1], 0b0000_01_10);
         assert_eq!(parser.program[2], 0b0000_00_01);
         assert_eq!(parser.program[3], 0b0010_10_00);
-        assert_eq!(parser.program[4], 0b10_000000);
-        assert_eq!(parser.program[5], 0b00000001);
+        assert_eq!(parser.mem_read::<u16>(4), 0b10_000000_00000001);
     }
 
     #[test]
@@ -1691,16 +1768,14 @@ mod tests {
         asm("skip2: nop");
         asm("nop");
 
-        assert_eq!(parser.program[0], 0b10_000000);
-        assert_eq!(parser.program[1], 0b00000011);
-        assert_eq!(parser.program[2], 0b01_000001);
-        assert_eq!(parser.program[3], 0b01_000010);
-        assert_eq!(parser.program[4], 0b1111_1111);
-        assert_eq!(parser.program[5], 0b10_000000);
-        assert_eq!(parser.program[6], 0b00001000);
-        assert_eq!(parser.program[7], 0b1111_1111);
-        assert_eq!(parser.program[8], 0b1111_1111);
-        assert_eq!(parser.program[8], 0b1111_1111);
+        assert_eq!(parser.mem_read::<u16>(0), 0b10_000000_00000011);
+        assert_eq!(parser.mem_read::<u8>(2), 0b01_000001);
+        assert_eq!(parser.mem_read::<u8>(3), 0b01_000010);
+        assert_eq!(parser.mem_read::<u8>(4), 0b1111_1111); // nop
+        assert_eq!(parser.mem_read::<u16>(5), 0b10_000000_00001000); // jmp skip2
+        assert_eq!(parser.mem_read::<u8>(7), 0b1111_1111);
+        assert_eq!(parser.mem_read::<u8>(8), 0b1111_1111);
+        assert_eq!(parser.mem_read::<u8>(8), 0b1111_1111);
         assert_eq!(parser.program.len(), 10);
     }
 
@@ -1790,8 +1865,8 @@ mod tests {
         p.accept_line("rjmp zero").unwrap();
         p.accept_line("rjmp four").unwrap();
 
-        let jmp1 = ((p.program[5] as u32) << 8) | p.program[6] as u32;
-        let jmp2 = ((p.program[7] as u32) << 8) | p.program[8] as u32;
+        let jmp1: u16 = p.mem_read(5);
+        let jmp2: u16 = p.mem_read(7);
 
         assert_eq!(jmp1, 0b1000_1011__0000_0000);
         assert_eq!(jmp2, 0b1000_1101__0000_0100);
@@ -1826,7 +1901,7 @@ mod tests {
         )
         .unwrap();
 
-        let jmp1 = ((p.program[4] as u32) << 8) | p.program[5] as u32;
+        let jmp1: u16 = p.mem_read(4);
 
         assert_eq!(jmp1, 0b0000_1010__0000_0110);
     }
@@ -1992,7 +2067,7 @@ mod tests {
             jmp start
 
             .db 1, 2, 3
-            .dw 1000h, 2000h, 3000h
+            .dw 1001h, 2002h, 3003h
 
             start: nop
         "
@@ -2004,9 +2079,9 @@ mod tests {
         assert_eq!(
             p.program.as_slice(),
             &[
-                0xf0, 12, 1, 2, 3, 0, //
-                0x00, 0x10, 0x00, 0x20, 0x00, 0x30, //
-                0x18, 0x29,
+                12, 0xf0, 1, 2, 3, 0, //
+                0x01, 0x10, 0x02, 0x20, 0x03, 0x30, //
+                0x29, 0x18,
             ]
         );
     }

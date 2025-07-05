@@ -10,6 +10,8 @@ mod expr;
 
 #[cfg(test)]
 pub mod asm_tests_red;
+mod from_bytes;
+mod lines;
 
 use std::{
     env,
