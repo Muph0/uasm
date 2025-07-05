@@ -3,7 +3,7 @@ use core::convert::Into;
 use std::collections::HashMap;
 use std::fmt::{Display, Write};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Error, Write as OtherWrite};
+use std::io::{stdin, BufRead, BufReader, BufWriter, Error, Write as OtherWrite};
 use std::num::ParseIntError;
 use std::ops::Range;
 use std::path::{self, Path, PathBuf};
@@ -259,20 +259,24 @@ impl Assembler {
     }
     #[must_use]
     pub(crate) fn accept_file(&mut self, filename: &str) -> Result<(), Vec<LocError>> {
-        let file = File::open(filename).map_err(|e| {
-            let msg = format!(
-                "Can't open file \"{filename}\" in \"{}\"",
-                std::env::current_dir()
-                    .ok()
-                    .as_ref()
-                    .and_then(|p| p.to_str())
-                    .unwrap_or("<unknown>")
-            );
-            self.errs(AsmError::from(e).wrap(msg))
-        })?;
+        let file: Box<dyn std::io::Read> = if filename == "STDIN" {
+            Box::new(stdin().lock())
+        } else {
+            Box::new(File::open(filename).map_err(|e| {
+                let msg = format!(
+                    "Can't open file \"{filename}\" in \"{}\"",
+                    std::env::current_dir()
+                        .ok()
+                        .as_ref()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("<unknown>")
+                );
+                self.errs(AsmError::from(e).wrap(msg))
+            })?)
+        };
 
         self.file_stack.push(filename.to_string());
-        self.accept_lines(lines_w_continuation(file))?;
+        self.accept_lines(lines_w_continuation(file))?; // FIXME: incorrect line numbers
         self.file_stack.pop();
         Ok(())
     }
