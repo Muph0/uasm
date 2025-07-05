@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::string::ParseError;
 use std::{default, fs, mem};
 
+use crate::cli::CliArgs;
 use crate::error::{AsmError, LocError};
 use crate::from_bytes::FromBytes;
 use crate::lines::lines_w_continuation;
@@ -231,7 +232,8 @@ impl Assembler {
         s
     }
     #[must_use]
-    pub fn parse<'a>(&'a mut self, filename: &str) -> Result<&'a [u8], Vec<LocError>> {
+    pub fn parse<'a>(&'a mut self, args: &CliArgs) -> Result<&'a [u8], Vec<LocError>> {
+        let filename = &args.input;
         log::trace!("Assembler::parse({filename})");
         self.accept_file(filename)?;
 
@@ -259,7 +261,7 @@ impl Assembler {
     }
     #[must_use]
     pub(crate) fn accept_file(&mut self, filename: &str) -> Result<(), Vec<LocError>> {
-        let file: Box<dyn std::io::Read> = if filename == "STDIN" {
+        let file: Box<dyn std::io::Read> = if filename == CliArgs::STDIN_VAL {
             Box::new(stdin().lock())
         } else {
             Box::new(File::open(filename).map_err(|e| {
@@ -313,16 +315,18 @@ impl Assembler {
         Ok(())
     }
     #[must_use]
-    pub(crate) fn accept_line(&mut self, line: &str) -> Result<(), Vec<LocError>> {
+    pub(crate) fn accept_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
         let token = read_token_peek(line);
         if token.is_empty() {
             return Ok(());
         }
 
         match self.block {
-            CodeBlock::Program => self.accept_program_line(line),
-            CodeBlock::Architecture => self.accept_arch_line(line),
-        }
+            CodeBlock::Program => self.accept_program_line(&mut line),
+            CodeBlock::Architecture => self.accept_arch_line(&mut line),
+        }?;
+
+        self.read_eol(&line).map_err(|e| self.errs(e))
     }
 
     fn get_program_word(&self, i: usize, big_endian: bool) -> u16 {
@@ -364,20 +368,20 @@ impl Assembler {
     }
 
     #[must_use]
-    fn accept_program_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
+    fn accept_program_line(&mut self, line: &mut &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program line: {}", line);
-        let mut token = read_token(&mut line);
+        let mut token = read_token(line);
 
         self.emit_align_padding();
 
         // try parsing label
         if is_identifier(token) {
-            let next = read_token_peek(&line);
+            let next = read_token_peek(line);
             if next == TOK_LABEL_MARK {
-                self.read_exact(TOK_LABEL_MARK, &mut line)
+                self.read_exact(TOK_LABEL_MARK, line)
                     .map_err(|e| self.err(e))?;
                 self.accept_program_label(token).map_err(|e| self.err(e))?;
-                token = read_token(&mut line);
+                token = read_token(line);
 
                 if token.is_empty() {
                     return Ok(());
@@ -430,7 +434,7 @@ impl Assembler {
             .into())
     }
     #[must_use]
-    fn accept_program_directive(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
+    fn accept_program_directive(&mut self, line: &mut &str) -> Result<(), Vec<LocError>> {
         log::debug!("Program directive: {}", line);
 
         let options = [
@@ -443,7 +447,7 @@ impl Assembler {
             TOK_ORG,
         ];
         let token = self
-            .read_one_of(&options, &mut line)
+            .read_one_of(&options, line)
             .map_err(|e| self.err(e.wrap_str("Unknown macro")))?;
 
         match token {
@@ -461,22 +465,22 @@ impl Assembler {
         }
     }
     #[must_use]
-    fn accept_directive_use(&mut self, mut line: &str) -> AsmResult<()> {
-        let token = self.read_identifier(&mut line)?;
+    fn accept_directive_use(&mut self, line: &mut &str) -> AsmResult<()> {
+        let token = self.read_identifier(line)?;
         if let Some(arch) = self.arch_names.get(token) {
             self.current_arch = arch.0;
+            Ok(())
         } else {
-            return Err(format!(
+            Err(format!(
                 "Unknown architecture \"{token}\", available {:?}.",
                 self.arch_names.keys()
             )
-            .into());
+            .into())
         }
-        self.read_eol(&mut line)
     }
     #[must_use]
-    fn accept_directive_include(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
-        let filename = self.read_str_lit(&mut line).map_err(|e| self.err(e))?;
+    fn accept_directive_include(&mut self, line: &mut &str) -> Result<(), Vec<LocError>> {
+        let filename = self.read_str_lit(line).map_err(|e| self.err(e))?;
 
         let file = Path::new(filename);
         let mut path = PathBuf::new();
@@ -494,13 +498,13 @@ impl Assembler {
     #[must_use]
     fn accept_directive_static_data(
         &mut self,
-        mut line: &str,
+        line: &mut &str,
         element_size: usize,
     ) -> AsmResult<()> {
         loop {
-            if let Ok(number) = self.read_number_literal(&mut line) {
+            if let Ok(number) = self.read_number_literal(line) {
                 self.emit_int(number, element_size)?;
-            } else if let Ok(string) = self.read_str_lit(&mut line) {
+            } else if let Ok(string) = self.read_str_lit(line) {
                 for b in string.bytes() {
                     self.emit_int(b.into(), element_size)?;
                 }
@@ -508,19 +512,19 @@ impl Assembler {
                 return Err("Expected number or string literal.".into());
             }
 
-            if let Ok(_) = self.read_eol(&mut line) {
+            if let Ok(_) = self.read_eol(line) {
                 return Ok(());
             }
 
-            let comma = self.read_exact(",", &mut line)?;
+            let comma = self.read_exact(",", line)?;
         }
     }
     #[must_use]
-    fn accept_directive_def(&mut self, mut line: &str) -> AsmResult<()> {
-        let name = read_token(&mut line);
-        self.read_exact("=", &mut line)?;
+    fn accept_directive_def(&mut self, line: &mut &str) -> AsmResult<()> {
+        let name = read_token(line);
+        self.read_exact("=", line)?;
         let mut sid = SYMBOL_INT;
-        let value = match self.read_symbol_value(&mut sid, None, &mut line)? {
+        let value = match self.read_symbol_value(&mut sid, None, line)? {
             ParsedParam::Value(i) => i,
             _ => return Err(format!("Unknown symbol {}", name).into()),
         };
@@ -535,8 +539,8 @@ impl Assembler {
         Ok(())
     }
     #[must_use]
-    fn accept_directive_org(&mut self, mut line: &str) -> AsmResult<()> {
-        let offset = self.read_number_literal(&mut line)?.abs() as usize;
+    fn accept_directive_org(&mut self, line: &mut &str) -> AsmResult<()> {
+        let offset = self.read_number_literal(line)?.abs() as usize;
 
         if self.program.len() > offset {
             return Err(format!("Offset {offset:x} has been already passed").into());
@@ -609,8 +613,11 @@ impl Assembler {
         let requests = self.label_requests.remove(label);
         if let Some(requests) = requests {
             for req in requests {
-                let code =
-                    self.accept_program_instr(req.isn, req.offset_bytes, &req.params_string)?;
+                let code = self.accept_program_instr(
+                    req.isn,
+                    req.offset_bytes,
+                    &mut req.params_string.as_str(),
+                )?;
                 self.emit_instruction(&code, Some(req.offset_bytes))?;
             }
         }
@@ -626,16 +633,16 @@ impl Assembler {
         &mut self,
         ir_id: InstrId,
         ir_address: usize,
-        mut line: &str,
+        line: &mut &str,
     ) -> AsmResult<BitVec<usize, Msb0>> {
         let mut parsed_params = Vec::<ParsedParam>::new();
-        let line_copy = line;
+        let line_copy: &str = line;
 
         let ir = self.arch()?.get_ir(ir_id);
         for expect_param in &ir.params {
             match expect_param {
                 Param::Token { value } => {
-                    self.read_exact(value.as_str(), &mut line)?;
+                    self.read_exact(value.as_str(), line)?;
                 }
                 Param::Symbol {
                     name,
@@ -643,7 +650,7 @@ impl Assembler {
                     limit,
                 } => {
                     let mut sid = *symbol_id;
-                    let parsed = self.read_symbol_value(&mut sid, limit.clone(), &mut line)?;
+                    let parsed = self.read_symbol_value(&mut sid, limit.clone(), line)?;
                     parsed_params.push(parsed);
                 }
             }
@@ -707,20 +714,17 @@ impl Assembler {
         Ok(code)
     }
 
-    fn start_architecture_block(&mut self, mut line: &str) -> AsmResult<()> {
+    fn start_architecture_block(&mut self, line: &mut &str) -> AsmResult<()> {
         self.block = CodeBlock::Architecture;
         self.current_arch = self.architectures.len();
-        let name = self.read_identifier(&mut line)?;
-        let endianess = self.read_one_of(&["BE", "LE"], &mut line)?;
+        let name = self.read_identifier(line)?;
+        let endianess = self.read_one_of(&["BE", "LE"], line)?;
         self.add_arch(Arch::new(name, endianess == 0));
         Ok(())
     }
-    fn accept_arch_line(&mut self, mut line: &str) -> Result<(), Vec<LocError>> {
+    fn accept_arch_line(&mut self, line: &mut &str) -> Result<(), Vec<LocError>> {
         let token = self
-            .read_one_of(
-                &[TOK_SYMBOL, TOK_MNEM, TOK_MACRO_MARK, TOK_ALIGN],
-                &mut line,
-            )
+            .read_one_of(&[TOK_SYMBOL, TOK_MNEM, TOK_MACRO_MARK, TOK_ALIGN], line)
             .map_err(|e| self.err(e))?;
 
         match token {
@@ -732,8 +736,7 @@ impl Assembler {
         }
         .map_err(|e| vec![self.err(e)])
     }
-    fn accept_symbol_line(&mut self, mut my_line: &str) -> AsmResult<()> {
-        let line = &mut my_line;
+    fn accept_symbol_line(&mut self, line: &mut &str) -> AsmResult<()> {
         let name = self.read_identifier(line)?;
         let size = self.read_size_opt(line)?;
 
@@ -773,8 +776,7 @@ impl Assembler {
         }
         Ok(())
     }
-    fn accept_mnem_line(&mut self, mut my_line: &str) -> AsmResult<()> {
-        let line = &mut my_line;
+    fn accept_mnem_line(&mut self, line: &mut &str) -> AsmResult<()> {
         let mnem = read_token(line);
 
         let mut params = Vec::<Param>::new();
@@ -883,16 +885,16 @@ impl Assembler {
         });
         Ok(())
     }
-    fn accept_arch_directive(&mut self, mut my_line: &str) -> AsmResult<()> {
-        self.read_exact(TOK_END, &mut my_line)?;
-        self.read_exact(&self.arch()?.name, &mut my_line)?;
-        self.read_eol(my_line)?;
+    fn accept_arch_directive(&mut self, line: &mut &str) -> AsmResult<()> {
+        self.read_exact(TOK_END, line)?;
+        self.read_exact(&self.arch()?.name, line)?;
+        self.read_eol(line)?;
 
         self.block = CodeBlock::Program;
         Ok(())
     }
-    fn accept_arch_alignment(&mut self, mut my_line: &str) -> AsmResult<()> {
-        let alignment = self.read_number_literal(&mut my_line)?;
+    fn accept_arch_alignment(&mut self, line: &mut &str) -> AsmResult<()> {
+        let alignment = self.read_number_literal(line)?;
         self.arch_mut()?.code_align = alignment as _;
         Ok(())
     }
@@ -949,10 +951,10 @@ impl Assembler {
     }
     #[must_use]
     fn read_eol(&self, line: &str) -> AsmResult<()> {
-        match line.trim().is_empty() {
+        match read_token_peek(line).is_empty() {
             true => Ok(()),
             false => Err(AsmError {
-                message: format!("Expected end of line, found '{}'", read_token_peek(line)),
+                message: format!("Expected end of line, found '{}'", line.trim()),
                 cause: None,
             }),
         }
@@ -1149,12 +1151,14 @@ impl Assembler {
         if found.is_none() {
             match *symbol_id {
                 SYMBOL_LABEL => {
+                    *parent_line = line;
                     return Ok(ParsedParam::UnresolvedLabel {
                         label: token.to_string(),
                     });
                 }
                 SYMBOL_INT => {
                     if token == TOK_PROGRAM_HERE {
+                        *parent_line = line;
                         return Ok(ParsedParam::Value(self.program.len() as _));
                     } else {
                         let result = self.read_number_literal(&mut token)?;

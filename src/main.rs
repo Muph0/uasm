@@ -17,7 +17,7 @@ use std::{
     env,
     fmt::Display,
     fs::File,
-    io::{BufWriter, Write},
+    io::{stderr, stdout, BufWriter, Write},
     path::Path,
 };
 
@@ -26,7 +26,7 @@ use cli::CliArgs;
 use error::AsmError;
 
 fn print_error<T: Display>(msg: T) {
-    println!("\x1B[1;31merror:\x1B[0m {}", msg);
+    writeln!(stderr().lock(), "\x1B[1;31merror:\x1B[0m {}", msg);
 }
 
 fn main() {
@@ -50,7 +50,7 @@ fn main() {
 fn run(args: CliArgs) -> Result<(), AsmError> {
     let mut asm = Assembler::new();
 
-    match asm.parse(&args.input) {
+    match asm.parse(&args) {
         Err(errors) => {
             log::trace!("Parsing finished with errors");
 
@@ -70,10 +70,14 @@ fn run(args: CliArgs) -> Result<(), AsmError> {
                     .to_string()
             });
 
-            let mut file = File::create(outfile)?;
-            let mut writer = BufWriter::new(file);
-            writer.write_all(program)?;
-            writer.flush()?;
+            if args.is_stdin() {
+                stdout().lock().write_all(program)?;
+            } else {
+                let mut file = File::create(outfile)?;
+                let mut writer = BufWriter::new(file);
+                writer.write_all(program)?;
+                writer.flush()?;
+            }
         }
     };
 
