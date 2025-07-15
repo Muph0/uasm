@@ -5,9 +5,6 @@ mod cli;
 mod error;
 mod expr;
 
-//mod parser;
-//lalrpop_mod!(pub grammar);
-
 #[cfg(test)]
 pub mod asm_tests_red;
 mod from_bytes;

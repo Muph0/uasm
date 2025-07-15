@@ -982,11 +982,17 @@ impl Assembler {
     fn read_number_literal<'a>(&self, parent_line: &mut &'a str) -> AsmResult<isize> {
         let mut line = *parent_line;
         let mut token = read_token(&mut line);
-
         let mut neg = false;
+
         if token == "-" {
             neg = true;
-            token = read_token(&mut line);
+            token = read_token(&mut line)
+        } else if token.starts_with("'") {
+            let c = token.trim_matches('\'');
+            return match c.len() {
+                1 => Ok(c.chars().next().unwrap() as u8 as isize),
+                _ => Err(format!("Invalid character literal {}.", &token).into()),
+            };
         }
 
         let result = match token.chars().last() {
@@ -1274,6 +1280,7 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
     let mut start = 0;
     let mut len = 0;
     let mut state = State::Any;
+    let mut opener = 0 as char;
 
     for c in text.chars() {
         state = match state {
@@ -1287,7 +1294,8 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
                     State::Minus
                 } else if c.is_alphanumeric() || c == '_' {
                     State::Ident
-                } else if c == '"' {
+                } else if c == '"' || c == '\'' {
+                    opener = c;
                     State::String
                 } else if c == ';' || c == '#' {
                     len = 0;
@@ -1323,7 +1331,7 @@ fn read_token<'a>(text: &mut &'a str) -> &'a str {
             State::Symbol => State::Done,
             State::String => match c {
                 '\\' => State::StringEsc,
-                '"' => State::LastOne,
+                c if c == opener => State::LastOne,
                 default => State::String,
             },
             State::StringEsc => State::String,
@@ -2177,5 +2185,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(p.program.as_slice(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn char_constant() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture a1 BE
+            mnem value $d:int -> $d[7:0]
+            .end a1
+            value 'A'
+            value 'B'
+            value 'C'
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(p.program.as_slice(), &['A' as u8, 'B' as u8, 'C' as u8]);
+    }
+    #[test]
+    fn char_constant_empty() {
+        let mut p = Assembler::new();
+        let e = p
+            .accept_lines(
+                ".architecture a1 BE
+                mnem value $d:int -> $d[7:0]
+                .end a1
+                value ''
+                value 'ab'
+                "
+                .lines()
+                .map(|s| Ok(s.to_string())),
+            )
+            .unwrap_err();
+
+        let correct = e[0].line == 4
+            && e[0].error.message.contains("''")
+            && e[1].line == 5
+            && e[1].error.message.contains("'ab'");
+        assert!(correct, "Errors: {:#?}", e);
     }
 }
