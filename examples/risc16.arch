@@ -1,0 +1,84 @@
+
+.architecture risc16 LE
+align 2
+
+symbol reg[4] = r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | r9 | r10 | r11 | r12 | r13 | r14 | r15
+
+symbol ctlreg[4] = sts | ip | bp | sp | debug:15
+
+-----------------------------------------------------
+-- REGISTER OPERATIONS
+
+mnem nop                        -> 0000 0000  0000 0000
+
+mnem cmp $d:reg, $s:reg         -> 00 00 0001  $d $s
+
+--                                     reg_w set
+--                                     |
+mnem add $d:reg, $s:reg         -> 00 01 0000  $d $s
+mnem sub $d:reg, $s:reg         -> 00 01 0001  $d $s
+mnem mul $d:reg, $s:reg         -> 00 01 0010  $d $s
+mnem div $d:reg, $s:reg         -> 00 01 0011  $d $s
+mnem carr $d:reg, $s:reg        -> 00 01 0100  $d $s
+mnem ineg $d:reg, $s:reg        -> 00 01 0101  $d $s
+mnem shft $d:reg, $s:reg        -> 00 01 0110  $d $s
+
+
+mnem mov $d:reg, $s:reg         -> 00 01 1111  $d $s
+
+--                             mem_use  reg_w
+--                                   \  /   line1_en
+--                                    \|    |
+mnem lb  $d:reg, $s:reg         -> 00 110 000  $d $s
+mnem sb  $d:reg, $s:reg         -> 00 100 000  $d $s
+mnem lw  $d:reg, $s:reg         -> 00 110 001  $d $s
+mnem sw  $d:reg, $s:reg         -> 00 100 001  $d $s
+
+-----------------------------------------------------
+-- BRANCHING
+--                                   greater
+--                                 not | equal
+--                                    \|/
+mnem beq $l:label               -> 01 001 $l[11:1]R
+mnem bgt $l:label               -> 01 010 $l[11:1]R
+mnem bge $l:label               -> 01 011 $l[11:1]R
+mnem jmp $l:label               -> 01 100 $l[11:1]R
+mnem bne $l:label               -> 01 101 $l[11:1]R
+mnem ble $l:label               -> 01 110 $l[11:1]R
+mnem blt $l:label               -> 01 111 $l[11:1]R
+
+
+mnem li  $d:reg, $imm:int(-256:511)     -> 10 $d[3:0] $imm[9:0]
+
+mnem pop  $d:reg                -> 11 000 000 $d 0000
+mnem push $s:reg                -> 11 000 001 0000 $s
+mnem mvctl $d:ctlreg, $s:ctlreg -> 11 000 010   $d $s
+mnem pushi $ofs:label           -> 11 000 011 $ofs[7:0]R
+
+mnem shl1  $r:reg                -> 11 000 100 0000 $r
+mnem shl2  $r:reg                -> 11 000 100 0001 $r
+mnem shl4  $r:reg                -> 11 000 100 0010 $r
+mnem shl8  $r:reg                -> 11 000 100 0011 $r
+
+mnem shr1  $r:reg                -> 11 000 100 0100 $r
+mnem shr2  $r:reg                -> 11 000 100 0101 $r
+mnem shr4  $r:reg                -> 11 000 100 0110 $r
+mnem shr8  $r:reg                -> 11 000 100 0111 $r
+
+mnem add1  $r:reg                -> 11 000 100 1000 $r
+mnem add2  $r:reg                -> 11 000 100 1001 $r
+mnem sub1  $r:reg                -> 11 000 100 1010 $r
+mnem sub2  $r:reg                -> 11 000 100 1011 $r
+
+mnem rctl $r:reg, $ctl:ctlreg   -> 11 010 000  $ctl $r
+mnem wctl $ctl:ctlreg, $r:reg   -> 11 011 000  $ctl $r
+
+--                                     mem_use  reg_w
+--                                           \  /
+--                                            ||
+mnem stv bp + $imm:int(0:511), $s:reg   -> 11 10 $s $imm[8:1]
+mnem ldv $d:reg, bp + $imm:int(0:511)   -> 11 11 $d $imm[8:1]
+
+
+.end risc16
+

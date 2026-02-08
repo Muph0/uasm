@@ -1,63 +1,81 @@
 
+.architecture rv32i LE
+align 4
 
-#architecture rv32i
+symbol reg[5] = x0 | x1 | x2 | x3 | x4 | x5 | x6 | x7 | \
+                x8 | x9 | x10 | x11 | x12 | x13 | x14 | x15 | \
+                x16 | x17 | x18 | x19 | x20 | x21 | x22 | x23 | \
+                x24 | x25 | x26 | x27 | x28 | x29 | x30 | x31
 
-symbol reg[5] = r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7
+-- R-type encoding:
+-- funct7 | rs2 | rs1 | funct3 | rd | opcode(0110011)
 
-mnem add  $rd:reg, $rs1:reg, $rs2:reg             -> [32]     0000 000    $rs2 $rs1 000 $rd 01 100 11
-mnem addi $rd:reg, $rs1:reg, $imm:int(0<=FFFFh)   -> [32]     $imm[11:0]       $rs1 000 $rd 00 100 11
+mnem add  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 000 $d 0110011
+mnem sub  $d:reg, $s1:reg, $s2:reg -> 0100000 $s2 $s1 000 $d 0110011
 
-#end rv32i
+mnem sll  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 001 $d 0110011
+mnem slt  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 010 $d 0110011
+mnem sltu $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 011 $d 0110011
 
+mnem xor  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 100 $d 0110011
+mnem srl  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 101 $d 0110011
+mnem sra  $d:reg, $s1:reg, $s2:reg -> 0100000 $s2 $s1 101 $d 0110011
 
-
-
-#architecture select8b
-
-symbol reg[3] = r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7
-
-mnem    li $imm:int(-64:63)  -> 00 $imm[5:0]
-mnem    mov $rd:reg, $rs:reg -> 01 $rd $rs
-----------------------------------------
--- READ-OPS
-mnem    and   $rs:reg  -> 10 000 $rs
-mnem    or    $rs:reg  -> 10 001 $rs
-mnem    nand  $rs:reg  -> 10 010 $rs
-mnem    nor   $rs:reg  -> 10 011 $rs
-
-mnem    add   $rs:reg  -> 10 100 $rs
-mnem    sub   $rs:reg  -> 10 101 $rs
-mnem    xor   $rs:reg  -> 10 110 $rs
-mnem    jmpin $rs:reg  -> 10 111 $rs
-----------------------------------------
--- BRANCHES
-mnem    brz   $rs:reg  -> 11 000 $rs
-mnem    bnz   $rs:reg  -> 11 001 $rs
-mnem    blt   $rs:reg  -> 11 010 $rs
-mnem    bge   $rs:reg  -> 11 011 $rs
--- WRITE-OPS
-mnem    inc            -> 11 100 $rd
-mnem    dec            -> 11 101 $rd
-mnem    write          -> 11 110 $rd
-
-mnem                   -> 11 111 000
-mnem                   -> 11 111 001
-mnem                   -> 11 111 010
-mnem                   -> 11 111 011
-mnem                   -> 11 111 100
-mnem                   -> 11 111 101
-mnem                   -> 11 111 110
-mnem  jmp $addr:label  -> 11 111 111
+mnem or   $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 110 $d 0110011
+mnem and  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 111 $d 0110011
 
 
-#end select8b
+-- I-type ALU:
+-- imm[11:0] | rs1 | funct3 | rd | opcode(0010011)
 
+mnem addi  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 000 $d 0010011
+mnem slti  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 010 $d 0010011
+mnem sltiu $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 011 $d 0010011
+mnem xori  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 100 $d 0010011
+mnem ori   $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 110 $d 0010011
+mnem andi  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 111 $d 0010011
 
-and r0
+-- shamt in imm[4:0], funct7 distinguishes SRLI/SRAI
 
-fibo:
-    li 1
-    mov r1, r0
-    li 0
-    jmp fibo
+mnem slli $d:reg, $s:reg, $shamt:int(0:31)  -> 0000000 $shamt $s 001 $d 0010011
+mnem srli $d:reg, $s:reg, $shamt:int(0:31)  -> 0000000 $shamt $s 101 $d 0010011
+mnem srai $d:reg, $s:reg, $shamt:int(0:31)  -> 0100000 $shamt $s 101 $d 0010011
 
+-- Load: mem[rs1 + imm] → rd
+-- opcode = 0000011
+
+mnem lb  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 000 $d 0000011
+mnem lh  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 001 $d 0000011
+mnem lw  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 010 $d 0000011
+mnem lbu $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 100 $d 0000011
+mnem lhu $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 101 $d 0000011
+
+-- Store: rs2 → mem[rs1 + imm]
+-- imm split
+
+mnem sb $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 000 $imm[4:0] 0100011
+mnem sh $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 001 $imm[4:0] 0100011
+mnem sw $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 010 $imm[4:0] 0100011
+
+-- B-type: if (rs1 cond rs2) PC += imm
+
+mnem beq  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 000 $off[4:1|11] 1100011
+mnem bne  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 001 $off[4:1|11] 1100011
+mnem blt  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 100 $off[4:1|11] 1100011
+mnem bge  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 101 $off[4:1|11] 1100011
+mnem bltu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 110 $off[4:1|11] 1100011
+mnem bgeu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 111 $off[4:1|11] 1100011
+
+-- U-type
+mnem lui   $d:reg, $imm:int(0:1048575)  -> $imm[31:12] $d 0110111
+mnem auipc $d:reg, $imm:int(0:1048575)  -> $imm[31:12] $d 0010111
+
+-- Jumps
+mnem jal $d:reg, $off:label -> $off[20|10:1|11|19:12] $d 1101111
+mnem jalr $d:reg, $imm:int(-2048:2047)($s:reg)  -> $imm[11:0] $s 000 $d 1100111
+
+-- System
+mnem ecall  -> 000000000000 00000 000 00000 1110011
+mnem ebreak -> 000000000001 00000 000 00000 1110011
+
+.end rv32i
