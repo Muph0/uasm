@@ -758,6 +758,10 @@ impl Assembler {
                 )));
             }
             variants.insert(variant.to_string(), value as _);
+            let value_str = value.to_string();
+            if !variants.contains_key(&value_str) {
+                variants.insert(value_str, value as _);
+            }
             if line.trim().is_empty() {
                 break;
             }
@@ -989,9 +993,12 @@ impl Assembler {
             token = read_token(&mut line)
         } else if token.starts_with("'") {
             let c = token.trim_matches('\'');
-            return match c.len() {
-                1 => Ok(c.chars().next().unwrap() as u8 as isize),
-                _ => Err(format!("Invalid character literal {}.", &token).into()),
+            match c.len() {
+                1 => {
+                    *parent_line = line;
+                    return Ok(c.chars().next().unwrap() as u8 as isize);
+                }
+                _ => return Err(format!("Invalid character literal {}.", &token).into()),
             };
         }
 
@@ -1150,6 +1157,7 @@ impl Assembler {
             *symbol_id = id;
         }
 
+        let line_before_token = line;
         token = read_token(&mut line);
         let symbol = self.arch()?.get_symbol(*symbol_id);
         let found = symbol.get_variant(token);
@@ -1167,8 +1175,19 @@ impl Assembler {
                         *parent_line = line;
                         return Ok(ParsedParam::Value(self.program.len() as _));
                     } else {
-                        let result = self.read_number_literal(&mut token)?;
-                        *parent_line = line;
+                        let mut num_line = line_before_token;
+                        let result = self.read_number_literal(&mut num_line)?;
+                        if let Some(ref range) = limit {
+                            if !range.contains(&result) {
+                                return Err(format!(
+                                    "Value {result} is out of range {}..{}",
+                                    range.start,
+                                    range.end - 1
+                                )
+                                .into());
+                            }
+                        }
+                        *parent_line = num_line;
                         return Ok(ParsedParam::Value(result));
                     }
                 }
@@ -1190,6 +1209,17 @@ impl Assembler {
         }
 
         let num = *found.unwrap() as isize;
+
+        if let Some(ref range) = limit {
+            if !range.contains(&num) {
+                return Err(format!(
+                    "Value {num} is out of range {}..{}",
+                    range.start,
+                    range.end - 1
+                )
+                .into());
+            }
+        }
 
         *parent_line = line;
         Ok(ParsedParam::Value(num))
@@ -2227,5 +2257,27 @@ mod tests {
             && e[1].line == 5
             && e[1].error.message.contains("'ab'");
         assert!(correct, "Errors: {:#?}", e);
+    }
+
+    #[test]
+    fn negative_literal() {
+        let mut p = setup_parser_simple();
+
+        p.accept_line("li 0").unwrap();
+        p.accept_line("li 63").unwrap();
+        p.accept_line("li -64").unwrap();
+
+        assert!(p.accept_line("li 64").is_err());
+        assert!(p.accept_line("li -65").is_err());
+    }
+
+    #[test]
+    fn literals_for_symbol_values() {
+        let mut p = setup_parser_simple();
+
+        p.accept_line("mov r0, r1").unwrap();
+        p.accept_line("mov 0, 1").unwrap();
+
+        assert!(p.accept_line("mov 3, 4").is_err());
     }
 }
