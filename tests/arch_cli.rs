@@ -52,3 +52,72 @@ fn arch_rv32i_assembles_basic_program() {
         stderr_str
     );
 }
+
+#[test]
+fn arch_list_finds_rv32i() {
+    let arch_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("arch");
+
+    let output = Command::new(cargo_bin())
+        .args(["--arch-list", "-I", arch_dir.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to start unas");
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "unas --arch-list failed: {}",
+        stderr_str
+    );
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let names: Vec<&str> = stdout_str.lines().collect();
+    assert!(
+        names.contains(&"rv32i"),
+        "Expected 'rv32i' in arch list, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn empty_output_produces_warning_no_file() {
+    let arch_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("arch");
+
+    let mut child = Command::new(cargo_bin())
+        .args(["--arch=rv32i", "-I", arch_dir.to_str().unwrap(), "STDIN"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start unas");
+
+    // Feed empty program (just a comment, no instructions)
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"-- nothing here\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "unas should succeed with empty output, got: {}",
+        stderr_str
+    );
+
+    // stdout should be empty (no binary output)
+    assert!(
+        output.stdout.is_empty(),
+        "Expected no stdout output, got {} bytes",
+        output.stdout.len()
+    );
+
+    // stderr should contain the warning
+    assert!(
+        stderr_str.contains("empty output"),
+        "Expected 'empty output' warning in stderr, got: {}",
+        stderr_str
+    );
+}

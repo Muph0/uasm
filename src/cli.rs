@@ -12,7 +12,7 @@ const VERSION: &str = "0.2.5 release";
 #[command(author, version = Some(VERSION), about, long_about = None)]
 pub struct CliArgs {
     /// Input file. For input from standard input, use "STDIN".
-    pub input: String,
+    pub input: Option<String>,
 
     #[arg(short, long)]
     pub output: Option<String>,
@@ -24,6 +24,10 @@ pub struct CliArgs {
     /// Pre-load a named architecture definition (looks for <name>.arch or <name>.s in include paths).
     #[arg(long)]
     pub arch: Option<String>,
+
+    /// List available architecture definitions found in include paths.
+    #[arg(long)]
+    pub arch_list: bool,
 }
 
 impl CliArgs {
@@ -32,7 +36,10 @@ impl CliArgs {
         Self::parse()
     }
     pub fn is_stdin(&self) -> bool {
-        self.input == Self::STDIN_VAL
+        self.input.as_deref() == Some(Self::STDIN_VAL)
+    }
+    pub fn input_file(&self) -> &str {
+        self.input.as_deref().unwrap_or("")
     }
 
     /// Build the effective list of include paths: explicit -I paths + UASM_INC env var.

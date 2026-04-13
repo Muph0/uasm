@@ -235,7 +235,7 @@ impl Assembler {
     }
     #[must_use]
     pub fn parse<'a>(&'a mut self, args: &CliArgs) -> Result<&'a [u8], Vec<LocError>> {
-        let filename = &args.input;
+        let filename = args.input_file();
         log::trace!("Assembler::parse({filename})");
 
         self.include_paths = args.effective_include_paths();
