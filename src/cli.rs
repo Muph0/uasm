@@ -42,10 +42,10 @@ impl CliArgs {
         self.input.as_deref().unwrap_or("")
     }
 
-    /// Build the effective list of include paths: explicit -I paths + UASM_INC env var.
+    /// Build the effective list of include paths: explicit -I paths + UNAS_INC env var.
     pub fn effective_include_paths(&self) -> Vec<PathBuf> {
         let mut paths = self.include_paths.clone();
-        if let Ok(env_val) = std::env::var("UASM_INC") {
+        if let Ok(env_val) = std::env::var("UNAS_INC") {
             for p in std::env::split_paths(&env_val) {
                 if !paths.contains(&p) {
                     paths.push(p);

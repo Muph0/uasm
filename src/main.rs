@@ -58,7 +58,7 @@ fn main() {
 fn list_architectures(args: &CliArgs) {
     let include_paths = args.effective_include_paths();
     if include_paths.is_empty() {
-        log::warn!("No include paths specified. Use -I or set UASM_INC.");
+        log::warn!("No include paths specified. Use -I or set UNAS_INC.");
         return;
     }
 
