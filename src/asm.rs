@@ -213,6 +213,7 @@ pub struct Assembler {
     program: Vec<u8>,
     labels: HashMap<String, usize>,
     label_requests: HashMap<String, Vec<ReparseRequest>>,
+    include_paths: Vec<PathBuf>,
 }
 impl Assembler {
     pub fn new() -> Self {
@@ -227,6 +228,7 @@ impl Assembler {
             program: Vec::new(),
             labels: Default::default(),
             label_requests: Default::default(),
+            include_paths: Vec::new(),
         };
         log::trace!("Created {s:?}");
         s
@@ -235,6 +237,14 @@ impl Assembler {
     pub fn parse<'a>(&'a mut self, args: &CliArgs) -> Result<&'a [u8], Vec<LocError>> {
         let filename = &args.input;
         log::trace!("Assembler::parse({filename})");
+
+        self.include_paths = args.effective_include_paths();
+
+        // Pre-load architecture if specified
+        if let Some(arch_name) = &args.arch {
+            self.load_arch_file(arch_name)?;
+        }
+
         self.accept_file(filename)?;
 
         let unmet_labels: Vec<_> = mem::take(&mut self.label_requests)
@@ -259,6 +269,27 @@ impl Assembler {
 
         Ok(&self.program)
     }
+
+    /// Search include paths for an architecture file (<name>.arch or <name>.s) and load it.
+    #[must_use]
+    fn load_arch_file(&mut self, name: &str) -> Result<(), Vec<LocError>> {
+        let extensions = ["arch", "s"];
+        for dir in &self.include_paths {
+            for ext in &extensions {
+                let candidate = dir.join(format!("{name}.{ext}"));
+                if candidate.is_file() {
+                    let path_str = candidate.to_string_lossy().to_string();
+                    log::info!("Loading architecture file: {path_str}");
+                    return self.accept_file(&path_str);
+                }
+            }
+        }
+        Err(self.errs(AsmError::from(format!(
+            "Architecture file for \"{name}\" not found in include paths: {:?}",
+            self.include_paths
+        ))))
+    }
+
     #[must_use]
     pub(crate) fn accept_file(&mut self, filename: &str) -> Result<(), Vec<LocError>> {
         let file: Box<dyn std::io::Read> = if filename == CliArgs::STDIN_VAL {
@@ -820,7 +851,7 @@ impl Assembler {
             if token.is_empty() {
                 break;
             }
-            let enc = match token {
+            match token {
                 "$" => {
                     let name = self.read_identifier(line)?;
 
@@ -840,46 +871,57 @@ impl Assembler {
                     let param_id = param_ids[param_ord].unwrap();
                     let param_size = param.size(&self.arch()?.symbol_table);
 
-                    let part = self
+                    let parts: Vec<Range<usize>> = self
                         .read_brackets_opt(TOK_SIZE_OPEN, TOK_SIZE_CLOSE, line, |s, line| {
-                            s.read_urange(line, true).or_else(|x| {
-                                s.read_number_literal(line)
-                                    .map(|bit| bit as usize)
-                                    .map(|bit| bit..bit + 1)
-                            })
+                            let mut segments = Vec::new();
+                            loop {
+                                let seg = s.read_urange(line, true).or_else(|_| {
+                                    s.read_number_literal(line)
+                                        .map(|bit| bit as usize)
+                                        .map(|bit| bit..bit + 1)
+                                })?;
+                                segments.push(seg);
+                                // Check for | separator for non-contiguous bit fields
+                                let peek = read_token_peek(line);
+                                if peek == "|" {
+                                    read_token(line);
+                                } else {
+                                    break;
+                                }
+                            }
+                            Ok(segments)
                         })?
-                        .or(param_size.map(|s| 0..s));
+                        .unwrap_or_else(|| param_size.map(|s| vec![0..s]).unwrap_or_default());
 
                     let rel = read_token_peek(&line) == TOK_RELATIVE;
                     if rel {
                         read_token(line);
                     }
 
-                    let part = match part {
-                        Some(range) => range,
-                        None => {
-                            let tname = &self.arch()?.get_symbol(*symbol_id).name;
-                            return Err(format!(
-                                "Type {tname} of parameter ${name} is unsized and no explicit size was provided. Use ${name}[i:j] to specify, what bits should be encoded"
-                            )
-                            .into());
-                        }
-                    };
-                    Encode::Param {
-                        id: param_id,
-                        part,
-                        relative: rel,
+                    if parts.is_empty() {
+                        let tname = &self.arch()?.get_symbol(*symbol_id).name;
+                        return Err(format!(
+                            "Type {tname} of parameter ${name} is unsized and no explicit size was provided. Use ${name}[i:j] to specify, what bits should be encoded"
+                        )
+                        .into());
+                    }
+
+                    for part in parts {
+                        encoding.push(Encode::Param {
+                            id: param_id,
+                            part,
+                            relative: rel,
+                        });
                     }
                 }
                 _ => {
                     let bits = usize::from_str_radix(token, 2)?;
-                    Encode::Bits {
+                    encoding.push(Encode::Bits {
                         value: bits,
                         size: token.len(),
-                    }
+                    });
                 }
             };
-            encoding.push(enc);
         }
 
         self.arch_mut()?.instructions.push(Instr {
@@ -2279,5 +2321,179 @@ mod tests {
         p.accept_line("mov 0, 1").unwrap();
 
         assert!(p.accept_line("mov 3, 4").is_err());
+    }
+
+    #[test]
+    fn pipe_bit_concat_encoding() {
+        // $a[7|5:3] should produce two Encode::Param entries:
+        //   bit 7 (range 7..8) then bits 5:3 (range 3..6)
+        let mut p = Assembler::new();
+
+        p.accept_line(".architecture a1 BE").unwrap();
+        p.accept_line("mnem test $a:int -> $a[7|5:3] 0000").unwrap();
+        p.accept_line(".end a1").unwrap();
+
+        let ir = p.arch().unwrap().get_instr_by_name("test").unwrap().0;
+        assert_eq!(ir.encoding.len(), 3);
+        assert_eq!(
+            ir.encoding[0],
+            Encode::Param {
+                id: 0,
+                part: 7..8,
+                relative: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[1],
+            Encode::Param {
+                id: 0,
+                part: 3..6,
+                relative: false
+            }
+        );
+        assert_eq!(ir.encoding[2], Encode::Bits { value: 0, size: 4 });
+
+        // Encode value FFh = 1111_1111:
+        //   bit 7 = 1, bits 5:3 = 0b111 → concat = 1_111 = 0xF, then 0000
+        p.accept_line("test FFh").unwrap();
+        assert_eq!(p.program[0], 0b1_111_0000);
+
+        // Encode value A8h = 1010_1000:
+        //   bit 7 = 1, bits 5:3 = 0b101 → concat = 1_101 = 0xD, then 0000
+        p.accept_line("test A8h").unwrap();
+        assert_eq!(p.program[1], 0b1_101_0000);
+
+        // Encode value 00h:
+        //   bit 7 = 0, bits 5:3 = 0b000 → concat = 0_000, then 0000
+        p.accept_line("test 0").unwrap();
+        assert_eq!(p.program[2], 0b0_000_0000);
+    }
+
+    #[test]
+    fn pipe_bit_concat_multi_segment() {
+        // Three segments: $a[7|4|1:0]
+        let mut p = Assembler::new();
+
+        p.accept_line(".architecture a1 BE").unwrap();
+        p.accept_line("mnem test2 $a:int -> $a[7|4|1:0] 0000")
+            .unwrap();
+        p.accept_line(".end a1").unwrap();
+
+        let ir = p.arch().unwrap().get_instr_by_name("test2").unwrap().0;
+        assert_eq!(ir.encoding.len(), 4);
+        assert_eq!(
+            ir.encoding[0],
+            Encode::Param {
+                id: 0,
+                part: 7..8,
+                relative: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[1],
+            Encode::Param {
+                id: 0,
+                part: 4..5,
+                relative: false
+            }
+        );
+        assert_eq!(
+            ir.encoding[2],
+            Encode::Param {
+                id: 0,
+                part: 0..2,
+                relative: false
+            }
+        );
+        assert_eq!(ir.encoding[3], Encode::Bits { value: 0, size: 4 });
+
+        // FFh = 1111_1111: bit7=1, bit4=1, bits1:0=11 → 1_1_11_0000
+        p.accept_line("test2 FFh").unwrap();
+        assert_eq!(p.program[0], 0b1_1_11_0000);
+    }
+
+    #[test]
+    fn pipe_bit_concat_errors() {
+        // Helper: set up a fresh parser in architecture block and try a mnem line
+        fn try_mnem(mnem_line: &str) -> Result<(), Vec<LocError>> {
+            let mut p = Assembler::new();
+            p.accept_line(".architecture a1 BE")?;
+            p.accept_line(mnem_line)
+        }
+
+        // Helper: set up arch with a valid mnem, then try assembling an instruction
+        fn try_asm(mnem_def: &str, asm_line: &str) -> Result<(), Vec<LocError>> {
+            let mut p = Assembler::new();
+            p.accept_line(".architecture a1 BE")?;
+            p.accept_line(mnem_def)?;
+            p.accept_line(".end a1")?;
+            p.accept_line(asm_line)
+        }
+
+        // 1. Empty brackets
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[]").is_err(),
+            "empty brackets should fail"
+        );
+
+        // 2. Pipe with nothing after it
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[7|]").is_err(),
+            "trailing pipe should fail"
+        );
+
+        // 3. Pipe with nothing before it
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[|3:0]").is_err(),
+            "leading pipe should fail"
+        );
+
+        // 4. Double pipe
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[7||3:0]").is_err(),
+            "double pipe should fail"
+        );
+
+        // 5. Missing closing bracket
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[7:0").is_err(),
+            "missing ] should fail"
+        );
+
+        // 6. Reference to undefined parameter in encoding
+        assert!(
+            try_mnem("mnem bad $a:int -> $b[7:0]").is_err(),
+            "unknown param $b should fail"
+        );
+
+        // 7. Ascending range (0:5 reversed means 5..1 which is empty)
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[0:5]").is_err(),
+            "ascending range should fail in reversed context"
+        );
+
+        // 8. Unsized param with no brackets at all
+        assert!(
+            try_mnem("mnem bad $a:int -> $a").is_err(),
+            "unsized param without brackets should fail"
+        );
+
+        // 9. Non-binary constant where binary expected in encoding
+        assert!(
+            try_mnem("mnem bad $a:int -> $a[7:0] ZZZZ").is_err(),
+            "non-binary constant should fail"
+        );
+
+        // 10. Missing arrow (no -> in mnem definition)
+        assert!(
+            try_mnem("mnem bad $a:int 0000 1111").is_err(),
+            "missing -> should fail"
+        );
+
+        // 11. Unknown symbol type in param
+        assert!(
+            try_mnem("mnem bad $a:nonexistent -> $a[7:0]").is_err(),
+            "unknown symbol type should fail"
+        );
     }
 }

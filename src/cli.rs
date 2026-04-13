@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 #[cfg(debug_assertions)]
@@ -14,6 +16,14 @@ pub struct CliArgs {
 
     #[arg(short, long)]
     pub output: Option<String>,
+
+    /// Add a directory to the include search path. Can be specified multiple times.
+    #[arg(short = 'I', long = "include")]
+    pub include_paths: Vec<PathBuf>,
+
+    /// Pre-load a named architecture definition (looks for <name>.arch or <name>.s in include paths).
+    #[arg(long)]
+    pub arch: Option<String>,
 }
 
 impl CliArgs {
@@ -23,5 +33,18 @@ impl CliArgs {
     }
     pub fn is_stdin(&self) -> bool {
         self.input == Self::STDIN_VAL
+    }
+
+    /// Build the effective list of include paths: explicit -I paths + UASM_INC env var.
+    pub fn effective_include_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.include_paths.clone();
+        if let Ok(env_val) = std::env::var("UASM_INC") {
+            for p in std::env::split_paths(&env_val) {
+                if !paths.contains(&p) {
+                    paths.push(p);
+                }
+            }
+        }
+        paths
     }
 }
