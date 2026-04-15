@@ -121,3 +121,49 @@ fn empty_output_produces_warning_no_file() {
         stderr_str
     );
 }
+
+#[test]
+fn arch_rv32i_lui_encodes_correct_immediate() {
+    let arch_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("arch");
+
+    let mut child = Command::new(cargo_bin())
+        .args(["--arch=rv32i", "-I", arch_dir.to_str().unwrap(), "STDIN"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start unas");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"lui x1, 12345h\nauipc x2, 1\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "unas failed: {}", stderr_str);
+
+    assert_eq!(
+        output.stdout.len(),
+        8,
+        "Expected 8 bytes, got {}. stderr: {}",
+        output.stdout.len(),
+        stderr_str
+    );
+
+    // lui x1, 12345h -> expected encoding: 0x123450B7
+    let lui_word = u32::from_le_bytes(output.stdout[0..4].try_into().unwrap());
+    assert_eq!(
+        lui_word, 0x123450B7,
+        "lui x1, 12345h: expected 0x123450B7, got 0x{:08X}",
+        lui_word
+    );
+
+    // auipc x2, 1 -> expected encoding: 0x00001117
+    let auipc_word = u32::from_le_bytes(output.stdout[4..8].try_into().unwrap());
+    assert_eq!(
+        auipc_word, 0x00001117,
+        "auipc x2, 1: expected 0x00001117, got 0x{:08X}",
+        auipc_word
+    );
+}

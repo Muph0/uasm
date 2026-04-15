@@ -66,8 +66,8 @@ mnem bltu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 110 $off[4:1|11
 mnem bgeu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 111 $off[4:1|11] 1100011
 
 -- U-type
-mnem lui   $d:reg, $imm:int(0:1048575)  -> $imm[31:12] $d 0110111
-mnem auipc $d:reg, $imm:int(0:1048575)  -> $imm[31:12] $d 0010111
+mnem lui   $d:reg, $imm:int(0:1048575)  -> $imm[19:0] $d 0110111
+mnem auipc $d:reg, $imm:int(0:1048575)  -> $imm[19:0] $d 0010111
 
 -- Jumps
 mnem jal $d:reg, $off:label -> $off[20|10:1|11|19:12] $d 1101111
