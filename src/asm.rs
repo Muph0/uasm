@@ -32,6 +32,7 @@ const TOK_DEF: &str = "def";
 const TOK_MNEM: &str = "mnem";
 const TOK_SYMBOL: &str = "symbol";
 const TOK_ALIGN: &str = "align";
+const TOK_EXTENDS: &str = "extends";
 const TOK_ORG: &str = "org";
 const TOK_RELATIVE: &str = "R";
 const TOK_LABEL_MARK: &str = ":";
@@ -50,7 +51,7 @@ const TOK_LIMIT_CLOSE: &str = ")";
 const SYMBOL_INT: SymbolTypeId = SymbolTypeId(0);
 const SYMBOL_LABEL: SymbolTypeId = SymbolTypeId(1);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Arch {
     name: String,
     symbol_table: Vec<SymbolType>,
@@ -115,7 +116,7 @@ impl SymbolTypeId {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct InstrId(usize);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SymbolType {
     name: String,
     size: Option<usize>,
@@ -126,7 +127,7 @@ impl SymbolType {
         self.variants.get(token)
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Instr {
     mnemonic: String,
     params: Vec<Param>,
@@ -142,7 +143,7 @@ impl<T> SizedInt<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Param {
     Symbol {
         name: String,
@@ -170,7 +171,7 @@ impl Param {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Encode {
     Bits {
         value: usize,
@@ -749,8 +750,22 @@ impl Assembler {
         self.block = CodeBlock::Architecture;
         self.current_arch = self.architectures.len();
         let name = self.read_identifier(line)?;
-        let endianess = self.read_one_of(&["BE", "LE"], line)?;
-        self.add_arch(Arch::new(name, endianess == 0));
+        let mode = self.read_one_of(&["BE", "LE", TOK_EXTENDS], line)?;
+        match mode {
+            0 | 1 => {
+                self.add_arch(Arch::new(name, mode == 0));
+            }
+            2 => {
+                let parent_name = self.read_identifier(line)?;
+                let parent_id = self.arch_names.get(parent_name).ok_or_else(|| {
+                    AsmError::new(&format!("Unknown architecture '{parent_name}'"))
+                })?;
+                let mut arch = self.architectures[parent_id.0].clone();
+                arch.name = name.to_string();
+                self.add_arch(arch);
+            }
+            _ => unreachable!(),
+        }
         Ok(())
     }
     fn accept_arch_line(&mut self, line: &mut &str) -> Result<(), Vec<LocError>> {
@@ -944,7 +959,6 @@ impl Assembler {
         self.arch_mut()?.code_align = alignment as _;
         Ok(())
     }
-
     fn read_param(&self, parent_line: &mut &str) -> AsmResult<Param> {
         let mut line = *parent_line;
         let token = read_token(&mut line);
@@ -2495,5 +2509,39 @@ mod tests {
             try_mnem("mnem bad $a:nonexistent -> $a[7:0]").is_err(),
             "unknown symbol type should fail"
         );
+    }
+
+    #[test]
+    fn extends_copies_symbols_and_instructions() {
+        let mut p = Assembler::new();
+        p.accept_lines(
+            "
+            .architecture base LE
+            align 2
+            symbol reg[2] = r0 | r1 | r2 | r3
+            mnem nop -> 1111 1111 1111 1111
+            mnem mov $d:reg, $s:reg -> 010 $d $s 0 0000 0000
+            .end base
+
+            .architecture ext extends base
+            mnem add $d:reg, $s:reg -> 001 $d $s 0 0000 0000
+            .end ext
+
+            .use ext
+
+            nop
+            mov r1, r2
+            add r3, r0
+        "
+            .lines()
+            .map(|s| Ok(s.to_string())),
+        )
+        .unwrap();
+
+        // Verify alignment was inherited (each instruction is 2 bytes)
+        assert_eq!(p.program.len(), 6);
+        assert_eq!(p.mem_read::<u16>(0), 0b1111_1111_1111_1111); // nop (inherited)
+        assert_eq!(p.mem_read::<u16>(2), 0b010_01_10_0_0000_0000); // mov r1, r2 (inherited)
+        assert_eq!(p.mem_read::<u16>(4), 0b001_11_00_0_0000_0000); // add r3, r0 (new)
     }
 }

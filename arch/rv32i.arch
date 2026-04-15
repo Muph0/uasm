@@ -6,8 +6,8 @@ symbol reg[5] = x0 | x1 | x2 | x3 | x4 | x5 | x6 | x7 | \
                 x16 | x17 | x18 | x19 | x20 | x21 | x22 | x23 | \
                 x24 | x25 | x26 | x27 | x28 | x29 | x30 | x31
 
--- R-type encoding:
--- funct7 | rs2 | rs1 | funct3 | rd | opcode(0110011)
+; R-type encoding:
+; funct7 | rs2 | rs1 | funct3 | rd | opcode(0110011)
 
 mnem add  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 000 $d 0110011
 mnem sub  $d:reg, $s1:reg, $s2:reg -> 0100000 $s2 $s1 000 $d 0110011
@@ -24,8 +24,8 @@ mnem or   $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 110 $d 0110011
 mnem and  $d:reg, $s1:reg, $s2:reg -> 0000000 $s2 $s1 111 $d 0110011
 
 
--- I-type ALU:
--- imm[11:0] | rs1 | funct3 | rd | opcode(0010011)
+; I-type ALU:
+; imm[11:0] | rs1 | funct3 | rd | opcode(0010011)
 
 mnem addi  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 000 $d 0010011
 mnem slti  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 010 $d 0010011
@@ -34,14 +34,14 @@ mnem xori  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 100 $d 0010011
 mnem ori   $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 110 $d 0010011
 mnem andi  $d:reg, $s:reg, $imm:int(-2048:2047) -> $imm[11:0] $s 111 $d 0010011
 
--- shamt in imm[4:0], funct7 distinguishes SRLI/SRAI
+; shamt in imm[4:0], funct7 distinguishes SRLI/SRAI
 
 mnem slli $d:reg, $s:reg, $shamt:int(0:31)  -> 0000000 $shamt[4:0] $s 001 $d 0010011
 mnem srli $d:reg, $s:reg, $shamt:int(0:31)  -> 0000000 $shamt[4:0] $s 101 $d 0010011
 mnem srai $d:reg, $s:reg, $shamt:int(0:31)  -> 0100000 $shamt[4:0] $s 101 $d 0010011
 
--- Load: mem[rs1 + imm] → rd
--- opcode = 0000011
+; Load: mem[rs1 + imm] → rd
+; opcode = 0000011
 
 mnem lb  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 000 $d 0000011
 mnem lh  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 001 $d 0000011
@@ -49,37 +49,42 @@ mnem lw  $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 010 $d 0000011
 mnem lbu $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 100 $d 0000011
 mnem lhu $d:reg, $imm:int(-2048:2047)($s:reg)   -> $imm[11:0] $s 101 $d 0000011
 
--- Store: rs2 → mem[rs1 + imm]
--- imm split
+; Store: rs2 → mem[rs1 + imm]
+; imm split
 
 mnem sb $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 000 $imm[4:0] 0100011
 mnem sh $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 001 $imm[4:0] 0100011
 mnem sw $s2:reg, $imm:int(-2048:2047)($s1:reg)  -> $imm[11:5] $s2 $s1 010 $imm[4:0] 0100011
 
--- B-type: if (rs1 cond rs2) PC += imm
+; B-type: if (rs1 cond rs2) PC += imm
 
-mnem beq  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 000 $off[4:1|11] 1100011
-mnem bne  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 001 $off[4:1|11] 1100011
-mnem blt  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 100 $off[4:1|11] 1100011
-mnem bge  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 101 $off[4:1|11] 1100011
-mnem bltu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 110 $off[4:1|11] 1100011
-mnem bgeu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5] $s2 $s1 111 $off[4:1|11] 1100011
+mnem beq  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 000 $off[4:1|11]R 1100011
+mnem bne  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 001 $off[4:1|11]R 1100011
+mnem blt  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 100 $off[4:1|11]R 1100011
+mnem bge  $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 101 $off[4:1|11]R 1100011
+mnem bltu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 110 $off[4:1|11]R 1100011
+mnem bgeu $s1:reg, $s2:reg, $off:label  -> $off[12|10:5]R $s2 $s1 111 $off[4:1|11]R 1100011
 
--- U-type
+; U-type
 mnem lui   $d:reg, $imm:int(0:1048575)  -> $imm[19:0] $d 0110111
 mnem auipc $d:reg, $imm:int(0:1048575)  -> $imm[19:0] $d 0010111
 
--- Jumps
-mnem jal $d:reg, $off:label -> $off[20|10:1|11|19:12] $d 1101111
+; Jumps
+mnem jal $d:reg, $off:label -> $off[20|10:1|11|19:12]R $d 1101111
 mnem jalr $d:reg, $imm:int(-2048:2047)($s:reg)  -> $imm[11:0] $s 000 $d 1100111
 
--- System
+; System
 mnem ecall  -> 000000000000 00000 000 00000 1110011
 mnem ebreak -> 000000000001 00000 000 00000 1110011
 
+; Aliases
+
+mnem nop -> 000000000000 00000 000 00000 0010011
+mnem li  $d:reg, $imm:int(-2048:2047) -> $imm[11:0] 00000 000 $d 0010011
+
 .end rv32i
 
--- ABI register aliases
+; ABI register aliases
 .def zero = reg:x0
 .def ra   = reg:x1
 .def sp   = reg:x2

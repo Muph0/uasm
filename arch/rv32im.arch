@@ -1,0 +1,18 @@
+.include "rv32i.arch"
+
+.architecture rv32im extends rv32i
+
+; M extension: Multiply / Divide
+; funct7(0000001) | rs2 | rs1 | funct3 | rd | opcode(0110011)
+
+mnem mul    $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 000 $d 0110011
+mnem mulh   $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 001 $d 0110011
+mnem mulhsu $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 010 $d 0110011
+mnem mulhu  $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 011 $d 0110011
+
+mnem div    $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 100 $d 0110011
+mnem divu   $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 101 $d 0110011
+mnem rem    $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 110 $d 0110011
+mnem remu   $d:reg, $s1:reg, $s2:reg -> 0000001 $s2 $s1 111 $d 0110011
+
+.end rv32im
