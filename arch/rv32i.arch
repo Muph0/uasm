@@ -82,6 +82,10 @@ mnem ebreak -> 000000000001 00000 000 00000 1110011
 mnem nop -> 000000000000 00000 000 00000 0010011
 mnem li  $d:reg, $imm:int(-2048:2047) -> $imm[11:0] 00000 000 $d 0010011
 
+mnem la $d:reg, $ad:int(0:4294967295) -> $ad[11:0]R $d 000 $d 0010011    $ad[31:12]R $d 0010111
+
+mnem j $off:label -> $off[20|10:1|11|19:12]R 00000 1101111
+
 .end rv32i
 
 ; ABI register aliases
